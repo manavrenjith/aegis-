@@ -17,14 +17,14 @@ import com.example.betaaegis.ui.theme.BetaAegisTheme
 import com.example.betaaegis.vpn.AegisVpnService
 
 /**
- * Phase 2: MainActivity with VPN control UI
+ * Phase 3: MainActivity with VPN control UI
  *
  * Provides simple controls to:
  * - Request VPN permission
  * - Start the VPN service
  * - Stop the VPN service
  *
- * Phase 2 adds TCP stream forwarding for internet connectivity.
+ * Phase 3 adds UDP forwarding and policy enforcement.
  */
 class MainActivity : ComponentActivity() {
 
@@ -110,7 +110,7 @@ fun VpnControlScreen(
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
-            text = "Phase 2: TCP Stream Forwarding",
+            text = "Phase 3: Policy + UDP",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.secondary
         )
@@ -168,23 +168,24 @@ fun VpnControlScreen(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Phase 2 Information
+        // Phase 3 Information
         Card(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = "Phase 2 Scope",
+                    text = "Phase 3 Scope",
                     style = MaterialTheme.typography.titleSmall
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "✓ Capture all traffic\n" +
                            "✓ TCP stream forwarding\n" +
-                           "✓ Internet connectivity\n" +
-                           "✓ Socket-based forwarding\n" +
-                           "✗ No UDP support yet\n" +
-                           "✗ No rule enforcement",
+                           "✓ UDP forwarding (DNS, QUIC)\n" +
+                           "✓ UID attribution\n" +
+                           "✓ Policy enforcement\n" +
+                           "✗ No domain-based rules yet\n" +
+                           "✗ No TLS inspection",
                     style = MaterialTheme.typography.bodySmall
                 )
             }

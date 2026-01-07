@@ -3,33 +3,36 @@ package com.example.betaaegis.vpn
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.example.betaaegis.vpn.tcp.TcpForwarder
+import com.example.betaaegis.vpn.udp.UdpForwarder
 import java.io.FileInputStream
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Phase 2 Update: TUN READER with TCP Forwarding
+ * Phase 3 Update: UDP Forwarding Added
  *
  * Phase 1: Read and observe packets
  * Phase 2: Route TCP packets to TcpForwarder for stream forwarding
+ * Phase 3: Route UDP packets to UdpForwarder
  *
  * IT MUST:
  * - Read raw packets from TUN file descriptor
  * - Route TCP packets to TcpForwarder (Phase 2)
+ * - Route UDP packets to UdpForwarder (Phase 3)
  * - Count packets for telemetry
  * - Log basic activity (periodically, not per-packet)
  * - Never crash on malformed input
  * - Handle interruptions gracefully
  *
- * IT MUST NOT (Phase 2):
- * - Forward UDP (Phase 3)
- * - Perform DNS handling
+ * IT MUST NOT:
  * - Parse beyond protocol detection
  * - Make enforcement decisions
+ * - Mix TCP and UDP logic
  *
- * PACKET HANDLING SEMANTICS (Phase 2):
+ * PACKET HANDLING SEMANTICS (Phase 3):
  * - TCP packets: Forwarded via TcpForwarder (stream-based)
- * - UDP packets: Dropped (Phase 3 will handle)
+ * - UDP packets: Forwarded via UdpForwarder (datagram-based)
  * - Other packets: Dropped
  * - NO passive forwarding exists
  */
@@ -37,7 +40,8 @@ class TunReader(
     private val vpnInterface: ParcelFileDescriptor,
     private val telemetry: VpnTelemetry,
     private val isRunning: AtomicBoolean,
-    private val tcpForwarder: TcpForwarder? = null // Phase 2 addition
+    private val tcpForwarder: TcpForwarder? = null, // Phase 2 addition
+    private val udpForwarder: UdpForwarder? = null  // Phase 3 addition
 ) {
 
     companion object {
@@ -136,9 +140,11 @@ class TunReader(
      *
      * Phase 1: Minimal processing (observe only)
      * Phase 2: Route TCP to TcpForwarder, drop others
+     * Phase 3: Route UDP to UdpForwarder
      *
-     * AUTHORITATIVE TCP HANDLING:
+     * AUTHORITATIVE HANDLING:
      * - TCP packets go to TcpForwarder (one path only)
+     * - UDP packets go to UdpForwarder (one path only)
      * - No "read and ignore" logic
      * - No passive forwarding
      *
@@ -156,40 +162,50 @@ class TunReader(
                 val snapshot = telemetry.getSnapshot()
                 Log.d(TAG, "Telemetry: $snapshot")
 
-                // Log TCP stats if forwarder exists
+                // Log forwarder stats
                 tcpForwarder?.let {
                     Log.d(TAG, "TCP: ${it.getStats()}")
                 }
+                udpForwarder?.let {
+                    Log.d(TAG, "UDP: ${it.getStats()}")
+                }
             }
 
-            // Phase 2: Route packets based on protocol
-            if (tcpForwarder != null) {
-                val protocol = getProtocol(buffer, length)
+            // Phase 2/3: Route packets based on protocol
+            val protocol = getProtocol(buffer, length)
 
-                when (protocol) {
-                    IPPROTO_TCP -> {
-                        // ONE AND ONLY ONE PATH for TCP
-                        // Hand to forwarder - it owns the connection now
+            when (protocol) {
+                IPPROTO_TCP -> {
+                    // ONE AND ONLY ONE PATH for TCP
+                    // Hand to forwarder - it owns the connection now
+                    if (tcpForwarder != null) {
                         val packet = buffer.copyOf(length)
                         tcpForwarder.handleTcpPacket(packet)
-                    }
-                    IPPROTO_UDP -> {
-                        // Phase 2: Drop UDP (Phase 3 will handle)
+                    } else {
+                        // Phase 1 fallback
                         if (Log.isLoggable(TAG, Log.VERBOSE)) {
-                            Log.v(TAG, "UDP packet dropped (not yet supported)")
-                        }
-                    }
-                    else -> {
-                        // Unknown protocol - drop
-                        if (Log.isLoggable(TAG, Log.VERBOSE)) {
-                            Log.v(TAG, "Unknown protocol: $protocol")
+                            Log.v(TAG, "TCP packet (no forwarder)")
                         }
                     }
                 }
-            } else {
-                // Phase 1 mode: Just observe (for compatibility)
-                if (Log.isLoggable(TAG, Log.VERBOSE)) {
-                    logPacketBasics(buffer, length)
+                IPPROTO_UDP -> {
+                    // ONE AND ONLY ONE PATH for UDP
+                    // Hand to forwarder
+                    if (udpForwarder != null) {
+                        val packet = buffer.copyOf(length)
+                        udpForwarder.handleUdpPacket(packet)
+                    } else {
+                        // Phase 2 fallback
+                        if (Log.isLoggable(TAG, Log.VERBOSE)) {
+                            Log.v(TAG, "UDP packet dropped (no forwarder)")
+                        }
+                    }
+                }
+                else -> {
+                    // Unknown protocol - drop
+                    if (Log.isLoggable(TAG, Log.VERBOSE)) {
+                        Log.v(TAG, "Unknown protocol: $protocol")
+                    }
                 }
             }
 
@@ -201,7 +217,8 @@ class TunReader(
 
         // END OF PACKET HANDLING
         // Phase 1: Packet is discarded after observation
-        // Phase 2: TCP is forwarded, others are dropped
+        // Phase 2: TCP is forwarded, UDP is dropped
+        // Phase 3: TCP and UDP are forwarded
     }
 
     /**

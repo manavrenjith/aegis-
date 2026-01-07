@@ -8,7 +8,10 @@ import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.example.betaaegis.MainActivity
+import com.example.betaaegis.vpn.policy.RuleEngine
+import com.example.betaaegis.vpn.policy.UidResolver
 import com.example.betaaegis.vpn.tcp.TcpForwarder
+import com.example.betaaegis.vpn.udp.UdpForwarder
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
@@ -16,23 +19,25 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Phase 1: Full-Capture VPN Service
  * Phase 2: TCP Stream Forwarding Added
+ * Phase 3: Policy and UDP Forwarding Added
  *
  * PURPOSE:
  * - Capture ALL app traffic into the VPN
  * - Forward TCP connections via socket-based streams (Phase 2)
- * - Observe traffic and establish architectural foundation
+ * - Forward UDP flows via datagram sockets (Phase 3)
+ * - Apply policy decisions per flow (Phase 3)
+ * - Attribute flows to UIDs (Phase 3)
  *
- * PHASE 2 ADDITIONS:
- * - TCP stream forwarder
- * - Socket-based connection handling
- * - Bidirectional stream forwarding
+ * PHASE 3 ADDITIONS:
+ * - UidResolver: Best-effort app attribution
+ * - RuleEngine: Per-UID policy evaluation
+ * - UdpForwarder: UDP flow management
+ * - Policy integration into TCP/UDP forwarders
  *
  * NON-GOALS (Still deferred):
- * - UDP forwarding (Phase 3)
- * - DNS handling
- * - Rule enforcement
- * - UID resolution
  * - TLS inspection
+ * - Domain-based rules
+ * - Dynamic mid-flow enforcement
  */
 class AegisVpnService : VpnService() {
 
@@ -40,7 +45,10 @@ class AegisVpnService : VpnService() {
     private var tunReaderThread: Thread? = null
     private val isRunning = AtomicBoolean(false)
     private var telemetry: VpnTelemetry? = null
-    private var tcpForwarder: TcpForwarder? = null // Phase 2 addition
+    private var tcpForwarder: TcpForwarder? = null // Phase 2
+    private var udpForwarder: UdpForwarder? = null // Phase 3
+    private var uidResolver: UidResolver? = null   // Phase 3
+    private var ruleEngine: RuleEngine? = null     // Phase 3
 
     companion object {
         private const val NOTIFICATION_ID = 1001
@@ -98,7 +106,7 @@ class AegisVpnService : VpnService() {
         try {
             val builder = Builder()
                 // Set VPN session name
-                .setSession("Aegis VPN Phase 1")
+                .setSession("Aegis VPN Phase 3")
 
                 // Configure TUN interface addresses
                 // This creates a virtual network interface
@@ -164,26 +172,37 @@ class AegisVpnService : VpnService() {
      *
      * Phase 1: Read and observe packets
      * Phase 2: Initialize TCP forwarder for stream forwarding
+     * Phase 3: Initialize policy components and UDP forwarder
      *
      * CONSTRAINTS:
      * - The read loop is BLOCKING
      * - TCP packets are forwarded via TcpForwarder (Phase 2)
-     * - No UDP forwarding yet (Phase 3)
+     * - UDP packets are forwarded via UdpForwarder (Phase 3)
+     * - Policy is evaluated once per flow (Phase 3)
      */
     private fun startTunReader() {
-        // Phase 2: Initialize TCP forwarder
+        // Initialize streams
         val tunFileDescriptor = vpnInterface!!.fileDescriptor
         val tunInputStream = FileInputStream(tunFileDescriptor)
         val tunOutputStream = FileOutputStream(tunFileDescriptor)
 
-        tcpForwarder = TcpForwarder(this, tunOutputStream)
+        // Phase 3: Initialize policy components
+        uidResolver = UidResolver()
+        ruleEngine = RuleEngine(uidResolver!!)
+
+        // Phase 2: Initialize TCP forwarder with policy (Phase 3)
+        tcpForwarder = TcpForwarder(this, tunOutputStream, ruleEngine)
+
+        // Phase 3: Initialize UDP forwarder with policy
+        udpForwarder = UdpForwarder(this, tunOutputStream, ruleEngine!!)
 
         tunReaderThread = Thread {
             val tunReader = TunReader(
                 vpnInterface!!,
                 telemetry!!,
                 isRunning,
-                tcpForwarder // Phase 2: Pass forwarder to reader
+                tcpForwarder, // Phase 2
+                udpForwarder  // Phase 3
             )
             tunReader.run()
         }.apply {
@@ -201,6 +220,15 @@ class AegisVpnService : VpnService() {
             // Phase 2: Close all TCP flows first
             tcpForwarder?.closeAllFlows()
             tcpForwarder = null
+
+            // Phase 3: Close all UDP flows
+            udpForwarder?.closeAll()
+            udpForwarder = null
+
+            // Phase 3: Clear policy caches
+            uidResolver?.clearCache()
+            uidResolver = null
+            ruleEngine = null
 
             // Stop reader thread
             tunReaderThread?.interrupt()
@@ -241,7 +269,7 @@ class AegisVpnService : VpnService() {
 
     private fun createNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setContentTitle("Aegis VPN Active")
-        .setContentText("Phase 2: TCP forwarding enabled")
+        .setContentText("Phase 3: TCP/UDP + Policy")
         .setSmallIcon(android.R.drawable.ic_dialog_info)
         .setContentIntent(
             PendingIntent.getActivity(
