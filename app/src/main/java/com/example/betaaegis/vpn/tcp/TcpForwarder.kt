@@ -2,8 +2,6 @@ package com.example.betaaegis.vpn.tcp
 
 import android.net.VpnService
 import android.util.Log
-import com.example.betaaegis.vpn.policy.FlowDecision
-import com.example.betaaegis.vpn.policy.RuleEngine
 import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -12,7 +10,6 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Phase 2: TCP Stream Forwarder
- * Phase 3: Policy Integration Added
  *
  * Manages TCP flow lifecycle and stream forwarding.
  *
@@ -21,7 +18,6 @@ import java.util.concurrent.atomic.AtomicLong
  * - Create protected sockets for each flow
  * - Forward data as streams (not packets)
  * - Construct response packets to write to TUN
- * - [Phase 3] Evaluate policy once per flow
  *
  * OWNERSHIP RULE (Critical):
  * Once a TCP packet is read from TUN, the VPN OWNS that connection.
@@ -33,17 +29,10 @@ import java.util.concurrent.atomic.AtomicLong
  * - App sees no response
  * - Connection times out
  * - No implicit kernel assistance
- *
- * POLICY INTEGRATION (Phase 3):
- * - Policy evaluated ONCE on SYN (new connection)
- * - Decision cached with flow
- * - BLOCK: Send RST, no socket creation
- * - ALLOW: Create socket, forward normally
  */
 class TcpForwarder(
     private val vpnService: VpnService,
-    private val tunOutputStream: FileOutputStream,
-    private val ruleEngine: RuleEngine? = null // Phase 3 addition
+    private val tunOutputStream: FileOutputStream
 ) {
     private val flows = ConcurrentHashMap<TcpFlowKey, TcpConnection>()
     private val executor = Executors.newCachedThreadPool { runnable ->
@@ -72,13 +61,11 @@ class TcpForwarder(
         val activeFlowCount = AtomicInteger(0)
         val totalFlowsCreated = AtomicLong(0)
         val totalFlowsClosed = AtomicLong(0)
-        val totalFlowsBlocked = AtomicLong(0) // Phase 3 addition
 
         override fun toString(): String {
             return "TCP Stats: flows=${activeFlowCount.get()}, " +
                    "up=${bytesUplink.get()}, down=${bytesDownlink.get()}, " +
-                   "created=${totalFlowsCreated.get()}, closed=${totalFlowsClosed.get()}, " +
-                   "blocked=${totalFlowsBlocked.get()}"
+                   "created=${totalFlowsCreated.get()}, closed=${totalFlowsClosed.get()}"
         }
     }
 
@@ -141,11 +128,6 @@ class TcpForwarder(
      * Handle new TCP connection (SYN from app).
      *
      * State transition: NEW -> CONNECTING -> ESTABLISHED
-     *
-     * Phase 3: Policy evaluation added
-     * - Evaluate rule ONCE on SYN
-     * - BLOCK: Send RST, no connection created
-     * - ALLOW: Create connection, proceed normally
      */
     private fun handleNewConnection(key: TcpFlowKey, metadata: TcpMetadata) {
         // Check if flow already exists (duplicate SYN)
@@ -154,30 +136,6 @@ class TcpForwarder(
             return
         }
 
-        // Phase 3: Evaluate policy ONCE per flow
-        if (ruleEngine != null) {
-            val decision = ruleEngine.evaluate(
-                protocol = "tcp",
-                srcIp = metadata.srcIp,
-                srcPort = metadata.srcPort,
-                destIp = metadata.destIp,
-                destPort = metadata.destPort
-            )
-
-            if (decision == FlowDecision.BLOCK) {
-                Log.d(TAG, "TCP flow blocked by policy: $key")
-                stats.totalFlowsBlocked.incrementAndGet()
-
-                // Send RST to app (connection refused)
-                sendRstForKey(key)
-
-                // No connection object created
-                // App will see connection refused
-                return
-            }
-        }
-
-        // ALLOW: Create connection
         Log.d(TAG, "New connection: $key")
 
         val connection = TcpConnection(
