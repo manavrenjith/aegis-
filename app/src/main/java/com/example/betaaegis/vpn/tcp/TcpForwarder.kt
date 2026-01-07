@@ -2,6 +2,7 @@ package com.example.betaaegis.vpn.tcp
 
 import android.net.VpnService
 import android.util.Log
+import com.example.betaaegis.telemetry.TcpStatsSnapshot
 import com.example.betaaegis.vpn.dns.DomainCache
 import com.example.betaaegis.vpn.policy.FlowDecision
 import com.example.betaaegis.vpn.policy.RuleEngine
@@ -304,4 +305,23 @@ class TcpForwarder(
      * Get current statistics.
      */
     fun getStats(): TcpStats = stats
+
+    /**
+     * Phase 5: Get statistics snapshot for observability.
+     *
+     * SAFETY:
+     * - Read-only operation
+     * - Never blocks forwarding
+     * - Safe to call from UI thread
+     */
+    fun getStatsSnapshot(): TcpStatsSnapshot {
+        return TcpStatsSnapshot(
+            bytesUplink = stats.bytesUplink.get(),
+            bytesDownlink = stats.bytesDownlink.get(),
+            activeFlowCount = stats.activeFlowCount.get(),
+            totalFlowsCreated = stats.totalFlowsCreated.get(),
+            totalFlowsClosed = stats.totalFlowsClosed.get()
+        )
+    }
 }
+

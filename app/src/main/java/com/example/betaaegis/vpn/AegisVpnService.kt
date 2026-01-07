@@ -8,6 +8,7 @@ import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.example.betaaegis.MainActivity
+import com.example.betaaegis.telemetry.*
 import com.example.betaaegis.vpn.dns.DomainCache
 import com.example.betaaegis.vpn.policy.RuleEngine
 import com.example.betaaegis.vpn.policy.UidResolver
@@ -21,6 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Phase 2: TCP Stream Forwarding Added
  * Phase 3: Policy and UDP Forwarding Added
  * Phase 4: DNS Inspection and Domain-Based Policy Added
+ * Phase 5: Observability and Diagnostics Added
  *
  * PURPOSE:
  * - Capture ALL app traffic into the VPN
@@ -30,12 +32,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - Attribute flows to UIDs (Phase 3)
  * - Inspect DNS and cache domain mappings (Phase 4)
  * - Apply domain-based policy rules (Phase 4)
+ * - Expose observability data for UI/diagnostics (Phase 5)
  *
- * PHASE 4 ADDITIONS:
- * - DomainCache: Maps IPs to domains from DNS responses
- * - DNS inspection in UDP forwarder (read-only)
- * - Domain-based rules in RuleEngine
- * - Domain attribution for TCP/UDP flows
+ * PHASE 5 ADDITIONS:
+ * - Statistics aggregation (read-only)
+ * - Safe UI data exposure
+ * - Zero data-plane impact
  *
  * NON-GOALS (Still deferred):
  * - TLS inspection
@@ -282,7 +284,7 @@ class AegisVpnService : VpnService() {
 
     private fun createNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setContentTitle("Aegis VPN Active")
-        .setContentText("Phase 4: DNS Inspection + Domain Policy")
+        .setContentText("Phase 5: Observability & Diagnostics")
         .setSmallIcon(android.R.drawable.ic_dialog_info)
         .setContentIntent(
             PendingIntent.getActivity(
@@ -293,4 +295,53 @@ class AegisVpnService : VpnService() {
             )
         )
         .build()
+
+    /**
+     * Phase 5: Collect VPN statistics for observability.
+     *
+     * SAFETY GUARANTEES:
+     * - Read-only operation
+     * - Never blocks forwarding
+     * - Safe to call from UI thread
+     * - Returns empty stats if VPN not running
+     * - Never throws exceptions
+     *
+     * @return VpnStatistics snapshot
+     */
+    fun getStatistics(): VpnStatistics {
+        if (!isRunning.get()) {
+            return VpnStatistics()
+        }
+
+        val collector = VpnStatisticsCollector()
+
+        return collector.collectStatistics(
+            getVpnTelemetry = {
+                telemetry?.getSnapshot()?.let {
+                    VpnTelemetrySnapshot(
+                        packetCount = it.packetCount,
+                        byteCount = it.byteCount,
+                        lastPacketTimestamp = it.lastPacketTimestamp
+                    )
+                } ?: VpnTelemetrySnapshot(0, 0, 0)
+            },
+            getTcpStats = {
+                tcpForwarder?.getStatsSnapshot() ?: TcpStatsSnapshot(0, 0, 0, 0, 0)
+            },
+            getUdpStats = {
+                udpForwarder?.getStatsSnapshot() ?: UdpStatsSnapshot(0, 0, 0, 0, 0, 0)
+            },
+            getDnsStats = {
+                domainCache?.getStatsSnapshot() ?: DnsStatsSnapshot(0, 0, 0)
+            }
+        )
+    }
+
+    /**
+     * Phase 5: Check if VPN is currently running.
+     */
+    fun isVpnRunning(): Boolean {
+        return isRunning.get()
+    }
 }
+

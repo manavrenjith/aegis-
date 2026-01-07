@@ -1,10 +1,13 @@
 package com.example.betaaegis.vpn.dns
 
 import android.util.Log
+import com.example.betaaegis.telemetry.DnsStatsSnapshot
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Phase 4: Domain Cache
+ * Phase 5: Added observability counters
  *
  * Maps IP addresses to domain names based on DNS responses.
  *
@@ -22,6 +25,10 @@ import java.util.concurrent.ConcurrentHashMap
 class DomainCache {
 
     private val cache = ConcurrentHashMap<String, CacheEntry>()
+
+    // Phase 5: Observability counters (read-only, never affect operation)
+    private val queriesObserved = AtomicLong(0)
+    private val responsesObserved = AtomicLong(0)
 
     companion object {
         private const val TAG = "DomainCache"
@@ -127,5 +134,40 @@ class DomainCache {
     fun getStats(): String {
         return "Domain cache: ${cache.size} entries"
     }
+
+    /**
+     * Phase 5: Record DNS query observation.
+     * Called by DNS inspector when query is parsed.
+     * NEVER affects forwarding.
+     */
+    fun recordQuery() {
+        queriesObserved.incrementAndGet()
+    }
+
+    /**
+     * Phase 5: Record DNS response observation.
+     * Called when response is parsed and cached.
+     * NEVER affects forwarding.
+     */
+    fun recordResponse() {
+        responsesObserved.incrementAndGet()
+    }
+
+    /**
+     * Phase 5: Get statistics snapshot for observability.
+     *
+     * SAFETY:
+     * - Read-only operation
+     * - Never blocks forwarding
+     * - Safe to call from UI thread
+     */
+    fun getStatsSnapshot(): DnsStatsSnapshot {
+        return DnsStatsSnapshot(
+            cacheSize = cache.size,
+            queriesObserved = queriesObserved.get(),
+            responsesObserved = responsesObserved.get()
+        )
+    }
 }
+
 

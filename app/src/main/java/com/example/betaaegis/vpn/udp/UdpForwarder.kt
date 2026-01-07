@@ -2,6 +2,7 @@ package com.example.betaaegis.vpn.udp
 
 import android.net.VpnService
 import android.util.Log
+import com.example.betaaegis.telemetry.UdpStatsSnapshot
 import com.example.betaaegis.vpn.dns.DnsInspector
 import com.example.betaaegis.vpn.dns.DomainCache
 import com.example.betaaegis.vpn.policy.FlowDecision
@@ -152,6 +153,7 @@ class UdpForwarder(
 
     /**
      * Phase 4: Inspect DNS query (read-only).
+     * Phase 5: Record observation for telemetry.
      *
      * Parsing failures are silently ignored.
      * This MUST NOT affect forwarding.
@@ -160,6 +162,9 @@ class UdpForwarder(
         try {
             val query = DnsInspector.parseQuery(metadata.payload)
             if (query != null) {
+                // Phase 5: Record observation (non-blocking, safe)
+                domainCache.recordQuery()
+
                 if (Log.isLoggable(TAG, Log.DEBUG)) {
                     Log.d(TAG, "DNS Query: ${query.domain} (${query.queryType})")
                 }
@@ -171,6 +176,7 @@ class UdpForwarder(
 
     /**
      * Phase 4: Inspect DNS response and cache domains (read-only).
+     * Phase 5: Record observation for telemetry.
      *
      * Parsing failures are silently ignored.
      * This MUST NOT affect forwarding.
@@ -179,6 +185,9 @@ class UdpForwarder(
         try {
             val response = DnsInspector.parseResponse(metadata.payload)
             if (response != null) {
+                // Phase 5: Record observation (non-blocking, safe)
+                domainCache.recordResponse()
+
                 // Cache all A/AAAA records
                 response.records.forEach { record ->
                     if (record.ipAddress != null) {
@@ -316,5 +325,25 @@ class UdpForwarder(
     fun getStats(): String {
         return stats.toString()
     }
+
+    /**
+     * Phase 5: Get statistics snapshot for observability.
+     *
+     * SAFETY:
+     * - Read-only operation
+     * - Never blocks forwarding
+     * - Safe to call from UI thread
+     */
+    fun getStatsSnapshot(): UdpStatsSnapshot {
+        return UdpStatsSnapshot(
+            bytesUplink = stats.bytesUplink.get(),
+            bytesDownlink = stats.bytesDownlink.get(),
+            activeFlowCount = stats.activeFlowCount.get(),
+            totalFlowsCreated = stats.totalFlowsCreated.get(),
+            totalFlowsClosed = stats.totalFlowsClosed.get(),
+            totalFlowsBlocked = stats.totalFlowsBlocked.get()
+        )
+    }
 }
+
 
