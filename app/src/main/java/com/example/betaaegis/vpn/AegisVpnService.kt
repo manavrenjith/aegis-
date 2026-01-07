@@ -15,6 +15,8 @@ import com.example.betaaegis.vpn.policy.UidResolver
 import com.example.betaaegis.vpn.tcp.TcpForwarder
 import com.example.betaaegis.vpn.udp.UdpForwarder
 import java.io.FileOutputStream
+import java.io.IOException
+import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -295,6 +297,16 @@ class AegisVpnService : VpnService() {
             )
         )
         .build()
+
+    fun createProtectedTcpSocket(): Socket {
+        val socket = Socket()
+        val ok = protect(socket)
+        if (!ok) {
+            socket.close()
+            throw IOException("Failed to protect TCP socket")
+        }
+        return socket
+    }
 
     /**
      * Phase 5: Collect VPN statistics for observability.

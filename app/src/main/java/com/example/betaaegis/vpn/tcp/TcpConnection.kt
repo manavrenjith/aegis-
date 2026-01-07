@@ -1,7 +1,7 @@
 package com.example.betaaegis.vpn.tcp
 
-import android.net.VpnService
 import android.util.Log
+import com.example.betaaegis.vpn.AegisVpnService
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.InetSocketAddress
@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class TcpConnection(
     private val key: TcpFlowKey,
-    private val vpnService: VpnService,
+    private val vpnService: AegisVpnService,
     private val tunOutputStream: FileOutputStream
 ) {
     private var socket: Socket? = null
@@ -60,12 +60,7 @@ class TcpConnection(
     fun connect() {
         state = TcpFlowState.CONNECTING
 
-        val sock = Socket()
-
-        // MANDATORY: Protect socket before connecting
-        if (!vpnService.protect(sock)) {
-            throw IOException("Failed to protect socket - would create routing loop")
-        }
+        val sock = vpnService.createProtectedTcpSocket()
 
         try {
             sock.connect(

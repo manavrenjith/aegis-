@@ -1,8 +1,8 @@
 package com.example.betaaegis.vpn.tcp
 
-import android.net.VpnService
 import android.util.Log
 import com.example.betaaegis.telemetry.TcpStatsSnapshot
+import com.example.betaaegis.vpn.AegisVpnService
 import com.example.betaaegis.vpn.dns.DomainCache
 import com.example.betaaegis.vpn.policy.FlowDecision
 import com.example.betaaegis.vpn.policy.RuleEngine
@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicLong
  * Phase 4: Domain-Based Policy Added
  */
 class TcpForwarder(
-    private val vpnService: VpnService,
+    private val vpnService: AegisVpnService,
     private val tunOutputStream: FileOutputStream,
     private val ruleEngine: RuleEngine? = null, // Phase 3: Optional policy engine
     private val domainCache: DomainCache? = null // Phase 4: Optional domain cache
