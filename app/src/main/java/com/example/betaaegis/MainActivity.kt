@@ -17,14 +17,14 @@ import com.example.betaaegis.ui.theme.BetaAegisTheme
 import com.example.betaaegis.vpn.AegisVpnService
 
 /**
- * Phase 1: MainActivity with VPN control UI
+ * Phase 2: MainActivity with VPN control UI
  *
  * Provides simple controls to:
  * - Request VPN permission
  * - Start the VPN service
  * - Stop the VPN service
  *
- * This is intentionally minimal to focus on VPN functionality.
+ * Phase 2 adds TCP stream forwarding for internet connectivity.
  */
 class MainActivity : ComponentActivity() {
 
@@ -110,7 +110,7 @@ fun VpnControlScreen(
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
-            text = "Phase 1: Full-Capture Foundation",
+            text = "Phase 2: TCP Stream Forwarding",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.secondary
         )
@@ -168,21 +168,22 @@ fun VpnControlScreen(
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Phase 1 Information
+        // Phase 2 Information
         Card(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = "Phase 1 Scope",
+                    text = "Phase 2 Scope",
                     style = MaterialTheme.typography.titleSmall
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "✓ Capture all traffic\n" +
-                           "✓ Observe packets\n" +
-                           "✓ Count & log metrics\n" +
-                           "✗ No forwarding yet\n" +
+                           "✓ TCP stream forwarding\n" +
+                           "✓ Internet connectivity\n" +
+                           "✓ Socket-based forwarding\n" +
+                           "✗ No UDP support yet\n" +
                            "✗ No rule enforcement",
                     style = MaterialTheme.typography.bodySmall
                 )

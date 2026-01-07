@@ -2,51 +2,42 @@ package com.example.betaaegis.vpn
 
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import com.example.betaaegis.vpn.tcp.TcpForwarder
 import java.io.FileInputStream
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 3️⃣ TUN READER RESPONSIBILITIES (STRICT)
+ * Phase 2 Update: TUN READER with TCP Forwarding
  *
- * Phase 1: This class reads raw packets from the TUN interface.
+ * Phase 1: Read and observe packets
+ * Phase 2: Route TCP packets to TcpForwarder for stream forwarding
  *
  * IT MUST:
  * - Read raw packets from TUN file descriptor
+ * - Route TCP packets to TcpForwarder (Phase 2)
  * - Count packets for telemetry
  * - Log basic activity (periodically, not per-packet)
  * - Never crash on malformed input
  * - Handle interruptions gracefully
  *
- * IT MUST NOT:
- * - Modify packets
- * - Forward packets
- * - Drop packets intentionally
- * - Perform TCP/UDP logic
- * - Perform checksum logic
- * - Attempt socket operations
- * - Parse packet contents (beyond minimal logging)
- * - Make routing decisions
- * - Implement any enforcement
+ * IT MUST NOT (Phase 2):
+ * - Forward UDP (Phase 3)
+ * - Perform DNS handling
+ * - Parse beyond protocol detection
+ * - Make enforcement decisions
  *
- * 4️⃣ PACKET HANDLING SEMANTICS
- *
- * "FAIL-OPEN" in Phase 1 means:
- * - Packets are OBSERVED, not controlled
- * - No enforcement decisions are applied
- * - No data-plane ownership is assumed
- * - If telemetry fails, packets are still read (and discarded)
- *
- * WHY THIS PHASE IS INTENTIONALLY INCOMPLETE:
- * - We establish capture infrastructure first
- * - Forwarding logic comes in future phases
- * - Correctness here means "do less, not more"
- * - Prevents premature optimization and hidden assumptions
+ * PACKET HANDLING SEMANTICS (Phase 2):
+ * - TCP packets: Forwarded via TcpForwarder (stream-based)
+ * - UDP packets: Dropped (Phase 3 will handle)
+ * - Other packets: Dropped
+ * - NO passive forwarding exists
  */
 class TunReader(
     private val vpnInterface: ParcelFileDescriptor,
     private val telemetry: VpnTelemetry,
-    private val isRunning: AtomicBoolean
+    private val isRunning: AtomicBoolean,
+    private val tcpForwarder: TcpForwarder? = null // Phase 2 addition
 ) {
 
     companion object {
@@ -58,6 +49,10 @@ class TunReader(
 
         // Log telemetry every N packets (avoid log spam)
         private const val LOG_INTERVAL = 1000
+
+        // IP Protocol numbers
+        private const val IPPROTO_TCP = 6
+        private const val IPPROTO_UDP = 17
     }
 
     /**
@@ -139,20 +134,20 @@ class TunReader(
     /**
      * Handle a single packet.
      *
-     * Phase 1: Minimal processing
-     * - Update telemetry
-     * - Periodic logging
-     * - NO packet modification
-     * - NO forwarding
-     * - NO enforcement
+     * Phase 1: Minimal processing (observe only)
+     * Phase 2: Route TCP to TcpForwarder, drop others
+     *
+     * AUTHORITATIVE TCP HANDLING:
+     * - TCP packets go to TcpForwarder (one path only)
+     * - No "read and ignore" logic
+     * - No passive forwarding
      *
      * @param buffer The buffer containing the packet
      * @param length The length of the packet in the buffer
      */
     private fun handlePacket(buffer: ByteArray, length: Int) {
         try {
-            // 5️⃣ MINIMAL TELEMETRY
-            // Update counters (thread-safe)
+            // Update telemetry (thread-safe)
             telemetry.recordPacket(length)
 
             // Periodic logging (avoid spam)
@@ -160,23 +155,67 @@ class TunReader(
             if (packetCount % LOG_INTERVAL == 0L) {
                 val snapshot = telemetry.getSnapshot()
                 Log.d(TAG, "Telemetry: $snapshot")
+
+                // Log TCP stats if forwarder exists
+                tcpForwarder?.let {
+                    Log.d(TAG, "TCP: ${it.getStats()}")
+                }
             }
 
-            // Optional: Extract minimal packet info for debugging
-            // Only enabled in verbose logging mode
-            if (Log.isLoggable(TAG, Log.VERBOSE)) {
-                logPacketBasics(buffer, length)
+            // Phase 2: Route packets based on protocol
+            if (tcpForwarder != null) {
+                val protocol = getProtocol(buffer, length)
+
+                when (protocol) {
+                    IPPROTO_TCP -> {
+                        // ONE AND ONLY ONE PATH for TCP
+                        // Hand to forwarder - it owns the connection now
+                        val packet = buffer.copyOf(length)
+                        tcpForwarder.handleTcpPacket(packet)
+                    }
+                    IPPROTO_UDP -> {
+                        // Phase 2: Drop UDP (Phase 3 will handle)
+                        if (Log.isLoggable(TAG, Log.VERBOSE)) {
+                            Log.v(TAG, "UDP packet dropped (not yet supported)")
+                        }
+                    }
+                    else -> {
+                        // Unknown protocol - drop
+                        if (Log.isLoggable(TAG, Log.VERBOSE)) {
+                            Log.v(TAG, "Unknown protocol: $protocol")
+                        }
+                    }
+                }
+            } else {
+                // Phase 1 mode: Just observe (for compatibility)
+                if (Log.isLoggable(TAG, Log.VERBOSE)) {
+                    logPacketBasics(buffer, length)
+                }
             }
 
         } catch (e: Exception) {
-            // TELEMETRY FAILURES MUST NOT AFFECT PACKET HANDLING
+            // TELEMETRY/FORWARDING FAILURES MUST NOT CRASH
             // Log the error but continue processing
-            Log.w(TAG, "Telemetry error (non-fatal): ${e.message}")
+            Log.w(TAG, "Packet handling error (non-fatal): ${e.message}")
         }
 
         // END OF PACKET HANDLING
-        // In Phase 1, we simply discard the packet after observation
-        // Future phases will add forwarding logic here
+        // Phase 1: Packet is discarded after observation
+        // Phase 2: TCP is forwarded, others are dropped
+    }
+
+    /**
+     * Get IP protocol number from packet.
+     *
+     * @return Protocol number, or -1 if invalid
+     */
+    private fun getProtocol(buffer: ByteArray, length: Int): Int {
+        if (length < 20) return -1
+
+        val version = (buffer[0].toInt() and 0xF0) ushr 4
+        if (version != 4) return -1 // IPv6 support deferred
+
+        return buffer[9].toInt() and 0xFF
     }
 
     /**
