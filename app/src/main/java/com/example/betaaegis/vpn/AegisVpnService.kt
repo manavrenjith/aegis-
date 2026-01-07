@@ -12,7 +12,6 @@ import com.example.betaaegis.vpn.policy.RuleEngine
 import com.example.betaaegis.vpn.policy.UidResolver
 import com.example.betaaegis.vpn.tcp.TcpForwarder
 import com.example.betaaegis.vpn.udp.UdpForwarder
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -183,7 +182,6 @@ class AegisVpnService : VpnService() {
     private fun startTunReader() {
         // Initialize streams
         val tunFileDescriptor = vpnInterface!!.fileDescriptor
-        val tunInputStream = FileInputStream(tunFileDescriptor)
         val tunOutputStream = FileOutputStream(tunFileDescriptor)
 
         // Phase 3: Initialize policy components
@@ -191,7 +189,7 @@ class AegisVpnService : VpnService() {
         ruleEngine = RuleEngine(uidResolver!!)
 
         // Phase 2: Initialize TCP forwarder with policy (Phase 3)
-        tcpForwarder = TcpForwarder(this, tunOutputStream, ruleEngine)
+        tcpForwarder = TcpForwarder(this, tunOutputStream, ruleEngine) // Pass ruleEngine
 
         // Phase 3: Initialize UDP forwarder with policy
         udpForwarder = UdpForwarder(this, tunOutputStream, ruleEngine!!)
@@ -281,4 +279,3 @@ class AegisVpnService : VpnService() {
         )
         .build()
 }
-
