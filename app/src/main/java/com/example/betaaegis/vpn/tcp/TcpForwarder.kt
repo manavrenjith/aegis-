@@ -2,6 +2,7 @@ package com.example.betaaegis.vpn.tcp
 
 import android.net.VpnService
 import android.util.Log
+import com.example.betaaegis.vpn.dns.DomainCache
 import com.example.betaaegis.vpn.policy.FlowDecision
 import com.example.betaaegis.vpn.policy.RuleEngine
 import java.io.FileOutputStream
@@ -13,11 +14,13 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * Phase 2: TCP Stream Forwarder
  * Phase 3: Policy Integration Added
+ * Phase 4: Domain-Based Policy Added
  */
 class TcpForwarder(
     private val vpnService: VpnService,
     private val tunOutputStream: FileOutputStream,
-    private val ruleEngine: RuleEngine? = null // Phase 3: Optional policy engine
+    private val ruleEngine: RuleEngine? = null, // Phase 3: Optional policy engine
+    private val domainCache: DomainCache? = null // Phase 4: Optional domain cache
 ) {
     private val flows = ConcurrentHashMap<TcpFlowKey, TcpConnection>()
     private val executor = Executors.newCachedThreadPool { runnable ->
@@ -113,6 +116,7 @@ class TcpForwarder(
      * Handle new TCP connection (SYN from app).
      *
      * Phase 3: Policy evaluation added
+     * Phase 4: Domain lookup for policy evaluation
      */
     private fun handleNewConnection(key: TcpFlowKey, metadata: TcpMetadata) {
         // Check if flow already exists (duplicate SYN)
@@ -121,6 +125,9 @@ class TcpForwarder(
             return
         }
 
+        // Phase 4: Lookup domain for destination IP (best-effort)
+        val domain = domainCache?.get(key.destIp)
+
         // Phase 3: Evaluate policy if engine is available
         if (ruleEngine != null) {
             val decision = ruleEngine.evaluate(
@@ -128,18 +135,19 @@ class TcpForwarder(
                 srcIp = key.srcIp,
                 srcPort = key.srcPort,
                 destIp = key.destIp,
-                destPort = key.destPort
+                destPort = key.destPort,
+                domain = domain // Phase 4: Pass domain to policy
             )
 
             if (decision == FlowDecision.BLOCK) {
-                Log.d(TAG, "TCP flow blocked by policy: $key")
+                Log.d(TAG, "TCP flow blocked by policy: $key (domain: $domain)")
                 // Send RST to app (connection rejected)
                 sendRstForKey(key)
                 return
             }
         }
 
-        Log.d(TAG, "New connection: $key")
+        Log.d(TAG, "New connection: $key (domain: $domain)")
 
         val connection = TcpConnection(
             key = key,

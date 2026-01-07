@@ -8,6 +8,7 @@ import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.example.betaaegis.MainActivity
+import com.example.betaaegis.vpn.dns.DomainCache
 import com.example.betaaegis.vpn.policy.RuleEngine
 import com.example.betaaegis.vpn.policy.UidResolver
 import com.example.betaaegis.vpn.tcp.TcpForwarder
@@ -19,6 +20,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Phase 1: Full-Capture VPN Service
  * Phase 2: TCP Stream Forwarding Added
  * Phase 3: Policy and UDP Forwarding Added
+ * Phase 4: DNS Inspection and Domain-Based Policy Added
  *
  * PURPOSE:
  * - Capture ALL app traffic into the VPN
@@ -26,16 +28,19 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - Forward UDP flows via datagram sockets (Phase 3)
  * - Apply policy decisions per flow (Phase 3)
  * - Attribute flows to UIDs (Phase 3)
+ * - Inspect DNS and cache domain mappings (Phase 4)
+ * - Apply domain-based policy rules (Phase 4)
  *
- * PHASE 3 ADDITIONS:
- * - UidResolver: Best-effort app attribution
- * - RuleEngine: Per-UID policy evaluation
- * - UdpForwarder: UDP flow management
- * - Policy integration into TCP/UDP forwarders
+ * PHASE 4 ADDITIONS:
+ * - DomainCache: Maps IPs to domains from DNS responses
+ * - DNS inspection in UDP forwarder (read-only)
+ * - Domain-based rules in RuleEngine
+ * - Domain attribution for TCP/UDP flows
  *
  * NON-GOALS (Still deferred):
  * - TLS inspection
- * - Domain-based rules
+ * - DoT/DoH interception
+ * - SNI inspection
  * - Dynamic mid-flow enforcement
  */
 class AegisVpnService : VpnService() {
@@ -48,6 +53,7 @@ class AegisVpnService : VpnService() {
     private var udpForwarder: UdpForwarder? = null // Phase 3
     private var uidResolver: UidResolver? = null   // Phase 3
     private var ruleEngine: RuleEngine? = null     // Phase 3
+    private var domainCache: DomainCache? = null   // Phase 4
 
     companion object {
         private const val NOTIFICATION_ID = 1001
@@ -105,7 +111,7 @@ class AegisVpnService : VpnService() {
         try {
             val builder = Builder()
                 // Set VPN session name
-                .setSession("Aegis VPN Phase 3")
+                .setSession("Aegis VPN Phase 4")
 
                 // Configure TUN interface addresses
                 // This creates a virtual network interface
@@ -172,12 +178,14 @@ class AegisVpnService : VpnService() {
      * Phase 1: Read and observe packets
      * Phase 2: Initialize TCP forwarder for stream forwarding
      * Phase 3: Initialize policy components and UDP forwarder
+     * Phase 4: Initialize DNS inspection and domain cache
      *
      * CONSTRAINTS:
      * - The read loop is BLOCKING
      * - TCP packets are forwarded via TcpForwarder (Phase 2)
      * - UDP packets are forwarded via UdpForwarder (Phase 3)
      * - Policy is evaluated once per flow (Phase 3)
+     * - DNS is inspected for domain attribution (Phase 4)
      */
     private fun startTunReader() {
         // Initialize streams
@@ -188,11 +196,14 @@ class AegisVpnService : VpnService() {
         uidResolver = UidResolver()
         ruleEngine = RuleEngine(uidResolver!!)
 
-        // Phase 2: Initialize TCP forwarder with policy (Phase 3)
-        tcpForwarder = TcpForwarder(this, tunOutputStream, ruleEngine) // Pass ruleEngine
+        // Phase 4: Initialize domain cache
+        domainCache = DomainCache()
 
-        // Phase 3: Initialize UDP forwarder with policy
-        udpForwarder = UdpForwarder(this, tunOutputStream, ruleEngine!!)
+        // Phase 2: Initialize TCP forwarder with policy (Phase 3) and domain cache (Phase 4)
+        tcpForwarder = TcpForwarder(this, tunOutputStream, ruleEngine, domainCache)
+
+        // Phase 3: Initialize UDP forwarder with policy and domain cache (Phase 4)
+        udpForwarder = UdpForwarder(this, tunOutputStream, ruleEngine!!, domainCache!!)
 
         tunReaderThread = Thread {
             val tunReader = TunReader(
@@ -227,6 +238,10 @@ class AegisVpnService : VpnService() {
             uidResolver?.clearCache()
             uidResolver = null
             ruleEngine = null
+
+            // Phase 4: Clear domain cache
+            domainCache?.clear()
+            domainCache = null
 
             // Stop reader thread
             tunReaderThread?.interrupt()
@@ -267,7 +282,7 @@ class AegisVpnService : VpnService() {
 
     private fun createNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setContentTitle("Aegis VPN Active")
-        .setContentText("Phase 3: TCP/UDP + Policy")
+        .setContentText("Phase 4: DNS Inspection + Domain Policy")
         .setSmallIcon(android.R.drawable.ic_dialog_info)
         .setContentIntent(
             PendingIntent.getActivity(

@@ -2,6 +2,8 @@ package com.example.betaaegis.vpn.udp
 
 import android.net.VpnService
 import android.util.Log
+import com.example.betaaegis.vpn.dns.DnsInspector
+import com.example.betaaegis.vpn.dns.DomainCache
 import com.example.betaaegis.vpn.policy.FlowDecision
 import com.example.betaaegis.vpn.policy.RuleEngine
 import java.io.FileOutputStream
@@ -13,6 +15,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Phase 3: UDP Flow Forwarder
+ * Phase 4: DNS Inspection Added
  *
  * Manages UDP flow lifecycle and forwarding.
  *
@@ -27,6 +30,12 @@ import java.util.concurrent.atomic.AtomicLong
  * - ALLOW: Create socket, forward
  * - BLOCK: Drop silently, no socket
  *
+ * PHASE 4: DNS INSPECTION (READ-ONLY)
+ * - Inspect DNS queries and responses on port 53
+ * - Cache IP → domain mappings
+ * - DNS inspection NEVER blocks forwarding
+ * - Parsing failures are silently ignored
+ *
  * ENFORCEMENT:
  * - Blocked flows never create UdpConnection
  * - App times out naturally
@@ -35,7 +44,8 @@ import java.util.concurrent.atomic.AtomicLong
 class UdpForwarder(
     private val vpnService: VpnService,
     private val tunOutputStream: FileOutputStream,
-    private val ruleEngine: RuleEngine
+    private val ruleEngine: RuleEngine,
+    private val domainCache: DomainCache // Phase 4
 ) {
     private val flows = ConcurrentHashMap<UdpFlowKey, UdpConnection>()
     private val executor = Executors.newCachedThreadPool { runnable ->
@@ -90,13 +100,24 @@ class UdpForwarder(
     /**
      * Handle UDP packet from TUN interface.
      *
-     * This is the ONLY path for UDP packets in Phase 3.
+     * This is the ONLY path for UDP packets in Phase 3/4.
+     *
+     * Phase 4: Inspect DNS packets for domain attribution.
      *
      * @param packet Raw IP/UDP packet from TUN
      */
     fun handleUdpPacket(packet: ByteArray) {
         try {
             val metadata = UdpPacketParser.parse(packet)
+
+            // Phase 4: DNS Inspection (Read-Only)
+            // This NEVER blocks forwarding
+            if (DnsInspector.isDns(metadata.destPort)) {
+                inspectDnsQuery(metadata)
+            } else if (metadata.srcPort == 53) {
+                // DNS response
+                inspectDnsResponse(metadata)
+            }
 
             val flowKey = UdpFlowKey(
                 metadata.srcIp,
@@ -130,6 +151,51 @@ class UdpForwarder(
     }
 
     /**
+     * Phase 4: Inspect DNS query (read-only).
+     *
+     * Parsing failures are silently ignored.
+     * This MUST NOT affect forwarding.
+     */
+    private fun inspectDnsQuery(metadata: UdpMetadata) {
+        try {
+            val query = DnsInspector.parseQuery(metadata.payload)
+            if (query != null) {
+                if (Log.isLoggable(TAG, Log.DEBUG)) {
+                    Log.d(TAG, "DNS Query: ${query.domain} (${query.queryType})")
+                }
+            }
+        } catch (e: Exception) {
+            // Silently ignore - inspection is best-effort
+        }
+    }
+
+    /**
+     * Phase 4: Inspect DNS response and cache domains (read-only).
+     *
+     * Parsing failures are silently ignored.
+     * This MUST NOT affect forwarding.
+     */
+    private fun inspectDnsResponse(metadata: UdpMetadata) {
+        try {
+            val response = DnsInspector.parseResponse(metadata.payload)
+            if (response != null) {
+                // Cache all A/AAAA records
+                response.records.forEach { record ->
+                    if (record.ipAddress != null) {
+                        domainCache.put(record.ipAddress, record.domain, record.ttl)
+
+                        if (Log.isLoggable(TAG, Log.DEBUG)) {
+                            Log.d(TAG, "DNS Response: ${record.domain} -> ${record.ipAddress} (TTL: ${record.ttl}s)")
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Silently ignore - inspection is best-effort
+        }
+    }
+
+    /**
      * Create a new UDP flow.
      *
      * POLICY EVALUATION:
@@ -137,19 +203,25 @@ class UdpForwarder(
      * - Decision is cached in flow object
      * - BLOCK: Return null, no socket created
      * - ALLOW: Create connection and socket
+     *
+     * Phase 4: Lookup domain from cache for policy evaluation.
      */
     private fun createFlow(key: UdpFlowKey, metadata: UdpMetadata): UdpConnection? {
+        // Phase 4: Lookup domain for destination IP (best-effort)
+        val domain = domainCache.get(metadata.destIp)
+
         // Evaluate policy (ONCE per flow)
         val decision = ruleEngine.evaluate(
             protocol = "udp",
             srcIp = metadata.srcIp,
             srcPort = metadata.srcPort,
             destIp = metadata.destIp,
-            destPort = metadata.destPort
+            destPort = metadata.destPort,
+            domain = domain // Phase 4: Pass domain to policy
         )
 
         if (decision == FlowDecision.BLOCK) {
-            Log.d(TAG, "UDP flow blocked: $key")
+            Log.d(TAG, "UDP flow blocked: $key (domain: $domain)")
             stats.totalFlowsBlocked.incrementAndGet()
             // Return null - no connection object created
             // App will timeout naturally
@@ -157,7 +229,7 @@ class UdpForwarder(
         }
 
         // ALLOW: Create connection
-        Log.d(TAG, "New UDP flow: $key")
+        Log.d(TAG, "New UDP flow: $key (domain: $domain)")
 
         val connection = UdpConnection(
             key = key,
