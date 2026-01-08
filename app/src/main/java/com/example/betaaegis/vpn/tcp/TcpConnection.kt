@@ -165,7 +165,7 @@ class TcpConnection(
                 close()
             }
         }.apply {
-            name = "TCP-Downlink-${key.destPort}"
+            name = "TCP-Downlink-${key.srcPort}->${key.destPort}"
             start()
         }
     }

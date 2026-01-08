@@ -118,14 +118,12 @@ class TcpForwarder(
      *
      * Phase 3: Policy evaluation added
      * Phase 4: Domain lookup for policy evaluation
+     *
+     * CONCURRENCY FIX:
+     * Uses putIfAbsent() for atomic flow creation to prevent races
+     * when multiple SYN packets arrive simultaneously.
      */
     private fun handleNewConnection(key: TcpFlowKey, metadata: TcpMetadata) {
-        // Check if flow already exists (duplicate SYN)
-        if (flows.containsKey(key)) {
-            Log.d(TAG, "Duplicate SYN for existing flow: $key")
-            return
-        }
-
         // Phase 4: Lookup domain for destination IP (best-effort)
         val domain = domainCache?.get(key.destIp)
 
@@ -148,15 +146,28 @@ class TcpForwarder(
             }
         }
 
-        Log.d(TAG, "New connection: $key (domain: $domain)")
-
+        // Create connection object
         val connection = TcpConnection(
             key = key,
             vpnService = vpnService,
             tunOutputStream = tunOutputStream
         )
 
-        flows[key] = connection
+        // ATOMIC INSERTION: Use putIfAbsent to prevent race conditions
+        // If another thread already created this flow, discard our attempt
+        val existing = flows.putIfAbsent(key, connection)
+
+        if (existing != null) {
+            // Another thread won the race - duplicate SYN
+            Log.d(TAG, "Duplicate SYN for existing flow: $key")
+            // Close our unused connection
+            connection.close()
+            return
+        }
+
+        // We won the race - this is the authoritative flow
+        Log.d(TAG, "New connection: $key (domain: $domain)")
+
         stats.activeFlowCount.incrementAndGet()
         stats.totalFlowsCreated.incrementAndGet()
 
