@@ -65,7 +65,7 @@ class UdpForwarder(
 
     companion object {
         private const val TAG = "UdpForwarder"
-        private const val IDLE_TIMEOUT_MS = 60_000L // 1 minute
+        private const val IDLE_TIMEOUT_MS = 120_000L // 2 minutes (WhatsApp-safe)
         private const val CLEANUP_INTERVAL_SECONDS = 30L
     }
 

@@ -135,19 +135,8 @@ class AegisVpnService : VpnService() {
                 // Set MTU (standard Ethernet MTU)
                 .setMtu(1500)
 
-                // CRITICAL: Allow this app to bypass VPN to prevent routing loop
-                // The VPN app must be able to make network calls without going through itself
                 .setBlocking(true)
 
-            // Apply self-bypass
-            try {
-                builder.addDisallowedApplication(packageName)
-            } catch (e: Exception) {
-                // If we can't bypass ourselves, abort
-                // This prevents catastrophic routing loops
-                android.util.Log.e("AegisVPN", "Failed to bypass self: ${e.message}")
-                return
-            }
 
             // 2️⃣ TUN INTERFACE ESTABLISHMENT
             // Establish the TUN interface and obtain file descriptor
