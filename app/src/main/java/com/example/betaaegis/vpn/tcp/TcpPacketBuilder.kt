@@ -23,9 +23,13 @@ object TcpPacketBuilder {
     private const val IP_VERSION = 4
     private const val IP_IHL = 5 // 5 * 4 = 20 bytes (no options)
     private const val IP_HEADER_SIZE = 20
-    private const val TCP_HEADER_SIZE = 20 // No options
+    private const val TCP_HEADER_SIZE_NO_OPTIONS = 20
     private const val IP_TTL = 64
     private const val IP_PROTOCOL_TCP = 6
+    private const val VPN_MTU = 1400
+    private const val CLAMPED_MSS = VPN_MTU - 40
+    private const val TCP_OPTION_MSS = 2
+    private const val TCP_OPTION_MSS_LENGTH = 4
 
     /**
      * Build a complete IP/TCP packet.
@@ -48,9 +52,20 @@ object TcpPacketBuilder {
         flags: Int,
         seqNum: Long,
         ackNum: Long,
-        payload: ByteArray
+        payload: ByteArray,
+        tcpOptions: ByteArray = byteArrayOf()
     ): ByteArray {
-        val totalSize = IP_HEADER_SIZE + TCP_HEADER_SIZE + payload.size
+        val clampedOptions = if ((flags and 0x02) != 0) {
+            clampMssInOptions(tcpOptions)
+        } else {
+            tcpOptions
+        }
+
+        val tcpHeaderSize = TCP_HEADER_SIZE_NO_OPTIONS + clampedOptions.size
+        val paddedTcpHeaderSize = ((tcpHeaderSize + 3) / 4) * 4
+        val padding = paddedTcpHeaderSize - tcpHeaderSize
+
+        val totalSize = IP_HEADER_SIZE + paddedTcpHeaderSize + payload.size
         val buffer = ByteBuffer.allocate(totalSize)
 
         // ===== IP Header =====
@@ -78,10 +93,15 @@ object TcpPacketBuilder {
         buffer.putShort(destPort.toShort()) // Destination port
         buffer.putInt(seqNum.toInt()) // Sequence number
         buffer.putInt(ackNum.toInt()) // Acknowledgment number
-        buffer.putShort((((TCP_HEADER_SIZE / 4) shl 12) or flags).toShort()) // Data offset + flags
+        buffer.putShort((((paddedTcpHeaderSize / 4) shl 12) or flags).toShort()) // Data offset + flags
         buffer.putShort(8192) // Window size
         buffer.putShort(0) // Checksum (fill in later)
         buffer.putShort(0) // Urgent pointer
+
+        buffer.put(clampedOptions)
+        for (i in 0 until padding) {
+            buffer.put(0)
+        }
 
         // ===== Payload =====
         buffer.put(payload)
@@ -92,11 +112,54 @@ object TcpPacketBuilder {
             buffer.array(),
             srcIp,
             destIp,
-            TCP_HEADER_SIZE + payload.size
+            paddedTcpHeaderSize + payload.size
         )
         buffer.putShort(tcpChecksumPos, tcpChecksum.toShort())
 
         return buffer.array()
+    }
+
+    private fun clampMssInOptions(options: ByteArray): ByteArray {
+        if (options.isEmpty()) return options
+
+        val result = options.copyOf()
+        var i = 0
+
+        while (i < result.size) {
+            val kind = result[i].toInt() and 0xFF
+
+            when (kind) {
+                0 -> break
+                1 -> i++
+                TCP_OPTION_MSS -> {
+                    if (i + TCP_OPTION_MSS_LENGTH <= result.size) {
+                        val length = result[i + 1].toInt() and 0xFF
+                        if (length == TCP_OPTION_MSS_LENGTH) {
+                            val mss = ((result[i + 2].toInt() and 0xFF) shl 8) or
+                                     (result[i + 3].toInt() and 0xFF)
+                            if (mss > CLAMPED_MSS) {
+                                result[i + 2] = (CLAMPED_MSS shr 8).toByte()
+                                result[i + 3] = (CLAMPED_MSS and 0xFF).toByte()
+                            }
+                        }
+                        i += length
+                    } else {
+                        break
+                    }
+                }
+                else -> {
+                    if (i + 1 < result.size) {
+                        val length = result[i + 1].toInt() and 0xFF
+                        if (length < 2) break
+                        i += length
+                    } else {
+                        break
+                    }
+                }
+            }
+        }
+
+        return result
     }
 
     /**

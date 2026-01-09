@@ -136,7 +136,7 @@ class AegisVpnService : VpnService() {
                 .addDnsServer("2001:4860:4860::8888")
 
                 // Set MTU (standard Ethernet MTU)
-                .setMtu(1500)
+                .setMtu(1400)
 
                 .setBlocking(true)
 

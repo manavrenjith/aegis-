@@ -87,6 +87,13 @@ class TcpConnection(
      */
     fun sendSynAck() {
         try {
+            val mssOption = byteArrayOf(
+                2,
+                4,
+                (1360 shr 8).toByte(),
+                (1360 and 0xFF).toByte()
+            )
+
             val packet = TcpPacketBuilder.build(
                 srcIp = key.destIp,
                 srcPort = key.destPort,
@@ -95,7 +102,8 @@ class TcpConnection(
                 flags = 0x12, // SYN + ACK
                 seqNum = nextSeqNum++,
                 ackNum = nextAckNum,
-                payload = byteArrayOf()
+                payload = byteArrayOf(),
+                tcpOptions = mssOption
             )
 
             synchronized(tunOutputStream) {
@@ -121,10 +129,10 @@ class TcpConnection(
         // Start downlink thread (server → app)
         downlinkThread = Thread {
             try {
-                val buffer = ByteArray(READ_BUFFER_SIZE)
                 val inputStream = sock.getInputStream()
 
                 while (isActive && !Thread.currentThread().isInterrupted) {
+                    val buffer = ByteArray(READ_BUFFER_SIZE)
                     val bytesRead = inputStream.read(buffer)
 
                     if (bytesRead == -1) {
@@ -134,7 +142,8 @@ class TcpConnection(
                     }
 
                     if (bytesRead > 0) {
-                        // Construct TCP response packet
+                        val payload = buffer.copyOf(bytesRead)
+
                         val packet = TcpPacketBuilder.build(
                             srcIp = key.destIp,
                             srcPort = key.destPort,
@@ -143,16 +152,15 @@ class TcpConnection(
                             flags = TCP_PSH_ACK,
                             seqNum = nextSeqNum,
                             ackNum = nextAckNum,
-                            payload = buffer.copyOf(bytesRead)
+                            payload = payload
                         )
 
-                        nextSeqNum += bytesRead
-
-                        // Write to TUN (synchronized to prevent corruption)
                         synchronized(tunOutputStream) {
                             tunOutputStream.write(packet)
+                            tunOutputStream.flush()
                         }
 
+                        nextSeqNum += bytesRead
                         bytesDownlink.addAndGet(bytesRead.toLong())
                     }
                 }
@@ -179,8 +187,14 @@ class TcpConnection(
         if (!isActive || payload.isEmpty()) return
 
         try {
-            socket?.getOutputStream()?.write(payload)
-            socket?.getOutputStream()?.flush()
+            val outputStream = socket?.getOutputStream()
+            if (outputStream == null) {
+                close()
+                return
+            }
+
+            outputStream.write(payload)
+            outputStream.flush()
             nextAckNum += payload.size
         } catch (e: IOException) {
             Log.e(TAG, "Failed to send to server for $key", e)
