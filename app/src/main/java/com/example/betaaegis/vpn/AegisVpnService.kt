@@ -16,7 +16,13 @@ import com.example.betaaegis.vpn.tcp.TcpForwarder
 import com.example.betaaegis.vpn.udp.UdpForwarder
 import java.io.FileOutputStream
 import java.io.IOException
+import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -52,14 +58,15 @@ class AegisVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var tunReaderThread: Thread? = null
     private val isRunning = AtomicBoolean(false)
+    private var socketExecutor: ExecutorService? = null
 
 
     private var telemetry: VpnTelemetry? = null
-    private var tcpForwarder: TcpForwarder? = null // Phase 2
-    private var udpForwarder: UdpForwarder? = null // Phase 3
-    private var uidResolver: UidResolver? = null   // Phase 3
-    private var ruleEngine: RuleEngine? = null     // Phase 3
-    private var domainCache: DomainCache? = null   // Phase 4
+    private var tcpForwarder: TcpForwarder? = null
+    private var udpForwarder: UdpForwarder? = null
+    private var uidResolver: UidResolver? = null
+    private var ruleEngine: RuleEngine? = null
+    private var domainCache: DomainCache? = null
 
     companion object {
         private const val NOTIFICATION_ID = 1001
@@ -115,6 +122,10 @@ class AegisVpnService : VpnService() {
         }
 
         try {
+
+            socketExecutor = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "VpnSocketOwner")
+            }
 
             val builder = Builder()
                 // Set VPN session name
@@ -225,7 +236,17 @@ class AegisVpnService : VpnService() {
 
         try {
 
-            // Phase 2: Close all TCP flows first
+            socketExecutor?.shutdown()
+            try {
+                if (socketExecutor?.awaitTermination(2, TimeUnit.SECONDS) == false) {
+                    socketExecutor?.shutdownNow()
+                }
+            } catch (e: InterruptedException) {
+                socketExecutor?.shutdownNow()
+                Thread.currentThread().interrupt()
+            }
+            socketExecutor = null
+
             tcpForwarder?.closeAllFlows()
             tcpForwarder = null
 
@@ -293,19 +314,34 @@ class AegisVpnService : VpnService() {
         )
         .build()
 
-    fun createProtectedTcpSocket(): Socket {
+    fun requestProtectedTcpSocket(destIp: InetAddress, destPort: Int): Socket {
         if (!isRunning.get() || vpnInterface == null) {
             throw IOException("VPN service not running")
         }
 
+        val executor = socketExecutor ?: throw IOException("Socket executor not initialized")
 
-        val socket = Socket()
-        val ok = protect(socket)
-        if (!ok) {
-            socket.close()
-            throw IOException("Failed to protect TCP socket")
+        val future = CompletableFuture<Socket>()
+
+        executor.execute {
+            try {
+                val socket = Socket()
+                val ok = protect(socket)
+                if (!ok) {
+                    socket.close()
+                    future.completeExceptionally(IOException("Failed to protect TCP socket"))
+                    return@execute
+                }
+
+                socket.connect(InetSocketAddress(destIp, destPort), 10000)
+                future.complete(socket)
+
+            } catch (e: Exception) {
+                future.completeExceptionally(e)
+            }
         }
-        return socket
+
+        return future.get()
     }
 
     /**

@@ -4,7 +4,6 @@ import android.util.Log
 import com.example.betaaegis.vpn.AegisVpnService
 import java.io.FileOutputStream
 import java.io.IOException
-import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicLong
 
@@ -37,7 +36,6 @@ class TcpConnection(
 
     companion object {
         private const val TAG = "TcpConnection"
-        private const val CONNECT_TIMEOUT_MS = 10000
         private const val READ_BUFFER_SIZE = 8192
         private const val TCP_PSH_ACK = 0x18
         private const val TCP_FIN_ACK = 0x11
@@ -60,12 +58,10 @@ class TcpConnection(
     fun connect() {
         state = TcpFlowState.CONNECTING
 
-        val sock = vpnService.createProtectedTcpSocket()
-
         try {
-            sock.connect(
-                InetSocketAddress(key.destIp, key.destPort),
-                CONNECT_TIMEOUT_MS
+            val sock = vpnService.requestProtectedTcpSocket(
+                java.net.InetAddress.getByName(key.destIp),
+                key.destPort
             )
 
             socket = sock
@@ -74,8 +70,7 @@ class TcpConnection(
 
             Log.d(TAG, "Connected: $key")
 
-        } catch (e: IOException) {
-            sock.close()
+        } catch (e: Exception) {
             throw IOException("Failed to connect to ${key.destIp}:${key.destPort}", e)
         }
     }
