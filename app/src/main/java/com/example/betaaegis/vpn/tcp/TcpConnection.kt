@@ -59,7 +59,7 @@ class TcpConnection(
         state = TcpFlowState.CONNECTING
 
         try {
-            val sock = vpnService.requestProtectedTcpSocket(
+            val sock = vpnService.createAndConnectProtectedTcpSocket(
                 java.net.InetAddress.getByName(key.destIp),
                 key.destPort
             )
