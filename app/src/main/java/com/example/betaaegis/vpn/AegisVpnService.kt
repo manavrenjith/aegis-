@@ -4,10 +4,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
@@ -21,8 +17,6 @@ import com.example.betaaegis.vpn.udp.UdpForwarder
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.Socket
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -59,13 +53,6 @@ class AegisVpnService : VpnService() {
     private var tunReaderThread: Thread? = null
     private val isRunning = AtomicBoolean(false)
 
-    @Volatile private var vpnReady = false
-    private var vpnReadyLatch: CountDownLatch? = null
-
-    @Volatile private var vpnNetworkReady = false
-    private var vpnNetworkLatch: CountDownLatch? = null
-    private var connectivityManager: ConnectivityManager? = null
-    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     private var telemetry: VpnTelemetry? = null
     private var tcpForwarder: TcpForwarder? = null // Phase 2
@@ -77,8 +64,6 @@ class AegisVpnService : VpnService() {
     companion object {
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "aegis_vpn_channel"
-        private const val VPN_READY_TIMEOUT_MS = 2000L
-        private const val VPN_NETWORK_READY_TIMEOUT_MS = 3000L
         const val ACTION_START_VPN = "com.example.betaaegis.START_VPN"
         const val ACTION_STOP_VPN = "com.example.betaaegis.STOP_VPN"
     }
@@ -86,7 +71,6 @@ class AegisVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         telemetry = VpnTelemetry()
-        connectivityManager = getSystemService(ConnectivityManager::class.java)
         createNotificationChannel()
     }
 
@@ -131,10 +115,6 @@ class AegisVpnService : VpnService() {
         }
 
         try {
-            vpnReady = false
-            vpnReadyLatch = CountDownLatch(1)
-            vpnNetworkReady = false
-            vpnNetworkLatch = CountDownLatch(1)
 
             val builder = Builder()
                 // Set VPN session name
@@ -172,8 +152,6 @@ class AegisVpnService : VpnService() {
 
             isRunning.set(true)
 
-            // Register network callback to detect VPN network activation
-            registerVpnNetworkCallback()
 
             // Start foreground service with notification
             startForeground(NOTIFICATION_ID, createNotification())
@@ -189,47 +167,6 @@ class AegisVpnService : VpnService() {
         }
     }
 
-    /**
-     * 2️⃣ TUN INTERFACE READING
-     *
-     * Starts a background thread that reads from the TUN interface.
-     *
-     * Phase 1: Read and observe packets
-     * Phase 2: Initialize TCP forwarder for stream forwarding
-     * Phase 3: Initialize policy components and UDP forwarder
-     * Phase 4: Initialize DNS inspection and domain cache
-     *
-     * CONSTRAINTS:
-     * - The read loop is BLOCKING
-     * - TCP packets are forwarded via TcpForwarder (Phase 2)
-     * - UDP packets are forwarded via UdpForwarder (Phase 3)
-     * - Policy is evaluated once per flow (Phase 3)
-     * - DNS is inspected for domain attribution (Phase 4)
-     */
-    private fun registerVpnNetworkCallback() {
-        try {
-            val request = NetworkRequest.Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_VPN)
-                .build()
-
-            val callback = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    if (!vpnNetworkReady) {
-                        vpnNetworkReady = true
-                        vpnNetworkLatch?.countDown()
-                        android.util.Log.d("AegisVPN", "VPN network activated in ConnectivityService")
-                    }
-                }
-            }
-
-            networkCallback = callback
-            connectivityManager?.registerNetworkCallback(request, callback)
-        } catch (e: Exception) {
-            android.util.Log.e("AegisVPN", "Failed to register network callback: ${e.message}")
-            vpnNetworkReady = true
-            vpnNetworkLatch?.countDown()
-        }
-    }
 
     /**
      * 2️⃣ TUN INTERFACE READING
@@ -279,10 +216,6 @@ class AegisVpnService : VpnService() {
             name = "TunReaderThread"
             start()
         }
-
-        vpnReady = true
-        vpnReadyLatch?.countDown()
-        android.util.Log.d("AegisVPN", "VPN readiness signal activated")
     }
 
     private fun stopVpn() {
@@ -291,18 +224,6 @@ class AegisVpnService : VpnService() {
         }
 
         try {
-            vpnReady = false
-            vpnReadyLatch = null
-            vpnNetworkReady = false
-            vpnNetworkLatch = null
-
-            // Unregister network callback
-            try {
-                networkCallback?.let { connectivityManager?.unregisterNetworkCallback(it) }
-                networkCallback = null
-            } catch (e: Exception) {
-                // Ignore
-            }
 
             // Phase 2: Close all TCP flows first
             tcpForwarder?.closeAllFlows()
@@ -373,29 +294,10 @@ class AegisVpnService : VpnService() {
         .build()
 
     fun createProtectedTcpSocket(): Socket {
-        if (!vpnReady) {
-            val latch = vpnReadyLatch
-            if (latch != null) {
-                val ready = latch.await(VPN_READY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                if (!ready) {
-                    throw IOException("VPN not ready after ${VPN_READY_TIMEOUT_MS}ms timeout")
-                }
-            } else {
-                throw IOException("VPN readiness gate not initialized")
-            }
+        if (!isRunning.get() || vpnInterface == null) {
+            throw IOException("VPN service not running")
         }
 
-        if (!vpnNetworkReady) {
-            val latch = vpnNetworkLatch
-            if (latch != null) {
-                val ready = latch.await(VPN_NETWORK_READY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                if (!ready) {
-                    throw IOException("VPN network not activated after ${VPN_NETWORK_READY_TIMEOUT_MS}ms timeout")
-                }
-            } else {
-                throw IOException("VPN network readiness gate not initialized")
-            }
-        }
 
         val socket = Socket()
         val ok = protect(socket)

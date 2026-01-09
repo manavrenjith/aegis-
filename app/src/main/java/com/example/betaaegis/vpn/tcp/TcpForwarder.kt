@@ -9,6 +9,7 @@ import com.example.betaaegis.vpn.policy.RuleEngine
 import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -124,6 +125,11 @@ class TcpForwarder(
      * when multiple SYN packets arrive simultaneously.
      */
     private fun handleNewConnection(key: TcpFlowKey, metadata: TcpMetadata) {
+        if (!vpnService.isVpnRunning()) {
+            Log.d(TAG, "Ignoring new connection after VPN stop: $key")
+            return
+        }
+
         // Phase 4: Lookup domain for destination IP (best-effort)
         val domain = domainCache?.get(key.destIp)
 
@@ -307,7 +313,12 @@ class TcpForwarder(
             closeFlow(key)
         }
 
-        executor.shutdown()
+        try {
+            executor.shutdownNow()
+            executor.awaitTermination(2, TimeUnit.SECONDS)
+        } catch (e: InterruptedException) {
+            Log.w(TAG, "Interrupted while waiting for executor shutdown")
+        }
 
         Log.i(TAG, "All flows closed")
     }
