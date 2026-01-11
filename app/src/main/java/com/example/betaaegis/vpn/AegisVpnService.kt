@@ -252,6 +252,7 @@ class AegisVpnService : VpnService() {
             vpnInterface?.close()
             vpnInterface = null
 
+
             // Log final telemetry
             telemetry?.let {
                 android.util.Log.i("AegisVPN", "Final telemetry: ${it.getSnapshot()}")
@@ -294,19 +295,24 @@ class AegisVpnService : VpnService() {
         )
         .build()
 
-    fun createAndConnectProtectedTcpSocket(destIp: InetAddress, destPort: Int): Socket {
+    fun createAndConnectProtectedTcpSocket(
+        destIp: InetAddress,
+        destPort: Int,
+        timeoutMs: Int = 10_000
+    ): Socket {
         if (!isRunning.get() || vpnInterface == null) {
             throw IOException("VPN service not running")
         }
 
         val socket = Socket()
 
-        if (!protect(socket)) {
+        val ok = protect(socket)
+        if (!ok) {
             socket.close()
-            throw IOException("Failed to protect TCP socket")
+            throw IOException("VpnService.protect() failed for TCP socket")
         }
 
-        socket.connect(InetSocketAddress(destIp, destPort), 10000)
+        socket.connect(InetSocketAddress(destIp, destPort), timeoutMs)
         return socket
     }
 
