@@ -13,7 +13,6 @@ import com.example.betaaegis.vpn.dns.DomainCache
 import com.example.betaaegis.vpn.policy.RuleEngine
 import com.example.betaaegis.vpn.policy.UidResolver
 import com.example.betaaegis.vpn.tcp.TcpForwarder
-import com.example.betaaegis.vpn.tcp.TcpSocketRequestQueue
 import com.example.betaaegis.vpn.udp.UdpForwarder
 import java.io.FileOutputStream
 import java.io.IOException
@@ -56,7 +55,8 @@ class AegisVpnService : VpnService() {
     private var tunReaderThread: Thread? = null
     private val isRunning = AtomicBoolean(false)
 
-    lateinit var tcpSocketQueue: TcpSocketRequestQueue
+    @Volatile
+    private var selfExcluded = false
 
     private var telemetry: VpnTelemetry? = null
     private var tcpForwarder: TcpForwarder? = null
@@ -74,7 +74,6 @@ class AegisVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
-        tcpSocketQueue = TcpSocketRequestQueue(this)
         telemetry = VpnTelemetry()
         createNotificationChannel()
     }
@@ -145,15 +144,29 @@ class AegisVpnService : VpnService() {
 
                 .setBlocking(true)
 
+            // Disallow VPN app itself from routing into VPN (NetGuard-style)
+            // This prevents kernel from auto-routing the app's sockets into VPN
+            // Guarantees protect() is no longer required for loop prevention
+            try {
+                builder.addDisallowedApplication(packageName)
+                selfExcluded = true
+                android.util.Log.i("AegisVPN", "Self application disallowed from VPN routing")
+            } catch (e: Exception) {
+                throw IllegalStateException(
+                    "CRITICAL: Failed to disallow self package from VPN routing",
+                    e
+                )
+            }
+
+            // Hard assertion: VPN must not start without self-exclusion
+            check(selfExcluded) {
+                "FATAL: VPN started without self-exclusion; kernel routing will break TCP"
+            }
 
             // 2️⃣ TUN INTERFACE ESTABLISHMENT
             // Establish the TUN interface and obtain file descriptor
             vpnInterface = builder.establish()
-
-            if (vpnInterface == null) {
-                android.util.Log.e("AegisVPN", "Failed to establish VPN interface")
-                return
-            }
+                ?: throw IllegalStateException("Failed to establish VPN interface")
 
             isRunning.set(true)
 
@@ -348,5 +361,47 @@ class AegisVpnService : VpnService() {
      */
     fun isVpnRunning(): Boolean {
         return isRunning.get()
+    }
+
+    /**
+     * Create and connect a protected TCP socket.
+     *
+     * CRITICAL: This method MUST execute synchronously and inline on the VpnService call stack.
+     * All three operations (Socket(), protect(), connect()) must occur in the same execution context.
+     *
+     * This is the ONLY correct way to ensure VpnService.protect() authorization succeeds.
+     *
+     * @param destIp Destination IP address
+     * @param destPort Destination port
+     * @param timeoutMs Connect timeout in milliseconds
+     * @return Connected and protected Socket
+     * @throws IOException if VPN not running, protect() fails, or connect() fails
+     */
+    fun createAndConnectProtectedTcpSocket(
+        destIp: InetAddress,
+        destPort: Int,
+        timeoutMs: Int = 10_000
+    ): Socket {
+        // Verify VPN is running
+        if (!isRunning.get() || vpnInterface == null) {
+            throw IOException("VPN service not running")
+        }
+
+        // Log thread for verification
+        android.util.Log.i("AegisVPN", "Calling protect() on thread=${Thread.currentThread().name}")
+
+        // Create socket
+        val socket = Socket()
+
+        // Protect socket (MUST be inline in VpnService call stack)
+        val ok = protect(socket)
+        if (!ok) {
+            socket.close()
+            throw IOException("VpnService.protect() failed")
+        }
+
+        // Connect socket
+        socket.connect(InetSocketAddress(destIp, destPort), timeoutMs)
+        return socket
     }
 }
