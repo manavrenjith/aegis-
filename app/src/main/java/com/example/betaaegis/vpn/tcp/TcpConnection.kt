@@ -39,6 +39,7 @@ class TcpConnection(
         private const val READ_BUFFER_SIZE = 8192
         private const val TCP_PSH_ACK = 0x18
         private const val TCP_FIN_ACK = 0x11
+        private const val CONNECT_TIMEOUT_MS = 10_000
     }
 
     /**
@@ -59,9 +60,10 @@ class TcpConnection(
         state = TcpFlowState.CONNECTING
 
         try {
-            val sock = vpnService.createAndConnectProtectedTcpSocket(
+            val sock = vpnService.tcpSocketQueue.requestSocket(
                 java.net.InetAddress.getByName(key.destIp),
-                key.destPort
+                key.destPort,
+                CONNECT_TIMEOUT_MS
             )
 
             socket = sock

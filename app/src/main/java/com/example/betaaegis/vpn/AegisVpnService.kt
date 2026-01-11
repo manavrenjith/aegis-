@@ -13,6 +13,7 @@ import com.example.betaaegis.vpn.dns.DomainCache
 import com.example.betaaegis.vpn.policy.RuleEngine
 import com.example.betaaegis.vpn.policy.UidResolver
 import com.example.betaaegis.vpn.tcp.TcpForwarder
+import com.example.betaaegis.vpn.tcp.TcpSocketRequestQueue
 import com.example.betaaegis.vpn.udp.UdpForwarder
 import java.io.FileOutputStream
 import java.io.IOException
@@ -51,10 +52,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class AegisVpnService : VpnService() {
 
-    private var vpnInterface: ParcelFileDescriptor? = null
+    internal var vpnInterface: ParcelFileDescriptor? = null
     private var tunReaderThread: Thread? = null
     private val isRunning = AtomicBoolean(false)
 
+    lateinit var tcpSocketQueue: TcpSocketRequestQueue
 
     private var telemetry: VpnTelemetry? = null
     private var tcpForwarder: TcpForwarder? = null
@@ -72,6 +74,7 @@ class AegisVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        tcpSocketQueue = TcpSocketRequestQueue(this)
         telemetry = VpnTelemetry()
         createNotificationChannel()
     }
@@ -295,25 +298,8 @@ class AegisVpnService : VpnService() {
         )
         .build()
 
-    fun createAndConnectProtectedTcpSocket(
-        destIp: InetAddress,
-        destPort: Int,
-        timeoutMs: Int = 10_000
-    ): Socket {
-        if (!isRunning.get() || vpnInterface == null) {
-            throw IOException("VPN service not running")
-        }
-
-        val socket = Socket()
-
-        val ok = protect(socket)
-        if (!ok) {
-            socket.close()
-            throw IOException("VpnService.protect() failed for TCP socket")
-        }
-
-        socket.connect(InetSocketAddress(destIp, destPort), timeoutMs)
-        return socket
+    fun isRunning(): Boolean {
+        return vpnInterface != null
     }
 
     /**
