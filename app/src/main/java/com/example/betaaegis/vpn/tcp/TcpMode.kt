@@ -21,6 +21,6 @@ object TcpMode {
      *
      * Default: false (packet-based)
      */
-    const val USE_TCP_PROXY = false
+    const val USE_TCP_PROXY = true
 }
 

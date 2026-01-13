@@ -47,8 +47,8 @@ class TcpForwarder(
     }
     private val stats = TcpStats()
 
-    // Phase 1: TCP Proxy Engine (passive observer, guarded by TcpMode.USE_TCP_PROXY)
-    private val tcpProxyEngine = TcpProxyEngine(vpnService)
+    // Phase 2: TCP Proxy Engine (active handshake, requires TUN output stream)
+    private val tcpProxyEngine = TcpProxyEngine(vpnService, tunOutputStream)
 
     companion object {
         private const val TAG = "TcpForwarder"

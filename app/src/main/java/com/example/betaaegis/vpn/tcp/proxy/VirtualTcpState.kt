@@ -1,19 +1,19 @@
 package com.example.betaaegis.vpn.tcp.proxy
 
 /**
- * Phase 1: Virtual TCP Connection State
+ * Phase 4: Virtual TCP Connection State
  *
  * State machine for user-space TCP proxy connections.
- * This differs from packet-based TcpFlowState because it represents
- * a virtual connection terminated by the VPN, not a forwarded flow.
+ * Phase 4 adds complete lifecycle management with FIN handling.
  *
- * State transitions (Phase 1 - observation only):
+ * State transitions:
  * CLOSED -> SYN_SEEN: When SYN packet observed from app
- * SYN_SEEN -> ESTABLISHED: (Reserved for Phase 2 - after handshake emulation)
- * ESTABLISHED -> FIN_WAIT: (Reserved for Phase 2 - on FIN)
+ * SYN_SEEN -> ESTABLISHED: After handshake emulation complete
+ * ESTABLISHED -> FIN_WAIT_SERVER: When FIN received from app
+ * ESTABLISHED -> FIN_WAIT_APP: When EOF from server socket
+ * FIN_WAIT_SERVER -> CLOSED: When EOF from server (both sides closed)
+ * FIN_WAIT_APP -> CLOSED: When FIN received from app (both sides closed)
  * Any -> RESET: On RST or error
- *
- * Phase 1: Only CLOSED and SYN_SEEN are used (observation only)
  */
 enum class VirtualTcpState {
     /**
@@ -23,24 +23,31 @@ enum class VirtualTcpState {
 
     /**
      * SYN packet observed from app
-     * Phase 1: Just tracking, no handshake yet
+     * Waiting for handshake to complete
      */
     SYN_SEEN,
 
     /**
      * Virtual connection established with app
-     * Reserved for Phase 2+
+     * Bidirectional data forwarding active
      */
     ESTABLISHED,
 
     /**
-     * FIN received, graceful shutdown in progress
-     * Reserved for Phase 2+
+     * Phase 4: FIN received from app
+     * Waiting for server to close (half-close)
      */
-    FIN_WAIT,
+    FIN_WAIT_SERVER,
+
+    /**
+     * Phase 4: EOF from server socket
+     * Waiting for app to close
+     */
+    FIN_WAIT_APP,
 
     /**
      * Connection reset or error
+     * Cleanup in progress
      */
     RESET
 }
