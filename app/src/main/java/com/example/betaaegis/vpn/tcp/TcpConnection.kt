@@ -19,6 +19,14 @@ import java.util.concurrent.atomic.AtomicLong
  * OWNERSHIP:
  * Once created, this object owns the TCP connection.
  * The kernel no longer manages this flow.
+ *
+ * NOTE (Phase 0):
+ * This class implements packet-based TCP flow management.
+ * It is intentionally preserved for debugging, comparison, and rollback purposes
+ * while a TCP proxy is developed in parallel.
+ *
+ * DO NOT refactor or extend this class.
+ * This implementation is frozen and will be replaced by VirtualTcpConnection in future phases.
  */
 class TcpConnection(
     private val key: TcpFlowKey,

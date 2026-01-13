@@ -13,6 +13,14 @@ package com.example.betaaegis.vpn.tcp
  * TIME_WAIT -> CLOSED: After timeout or final ACK
  * Any -> RESET: When RST received
  * RESET -> CLOSED: Immediately after cleanup
+ *
+ * NOTE (Phase 0):
+ * This enum represents the state machine for packet-based TCP forwarding.
+ * It is intentionally preserved for debugging, comparison, and rollback purposes
+ * while a TCP proxy is developed in parallel.
+ *
+ * DO NOT refactor or extend this enum.
+ * The TCP proxy will use VirtualTcpState with different semantics.
  */
 enum class TcpFlowState {
     /** Initial state, no connection */

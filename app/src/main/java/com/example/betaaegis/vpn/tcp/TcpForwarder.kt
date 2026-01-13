@@ -6,6 +6,7 @@ import com.example.betaaegis.vpn.AegisVpnService
 import com.example.betaaegis.vpn.dns.DomainCache
 import com.example.betaaegis.vpn.policy.FlowDecision
 import com.example.betaaegis.vpn.policy.RuleEngine
+import com.example.betaaegis.vpn.tcp.proxy.TcpProxyEngine
 import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -17,6 +18,19 @@ import java.util.concurrent.atomic.AtomicLong
  * Phase 2: TCP Stream Forwarder
  * Phase 3: Policy Integration Added
  * Phase 4: Domain-Based Policy Added
+ *
+ * NOTE (Phase 0):
+ * This class implements packet-based TCP forwarding with socket-based stream handling.
+ * It is intentionally preserved for debugging, comparison, and rollback purposes
+ * while a TCP proxy is developed in parallel.
+ *
+ * DO NOT refactor or extend this class.
+ * All new TCP features should target the future TCP proxy implementation.
+ *
+ * This implementation will remain frozen and will be conditionally executed
+ * based on TcpMode.USE_TCP_PROXY flag.
+ *
+ * Phase 1: Added TcpProxyEngine integration (passive, guarded by feature flag)
  */
 class TcpForwarder(
     private val vpnService: AegisVpnService,
@@ -32,6 +46,9 @@ class TcpForwarder(
         }
     }
     private val stats = TcpStats()
+
+    // Phase 1: TCP Proxy Engine (passive observer, guarded by TcpMode.USE_TCP_PROXY)
+    private val tcpProxyEngine = TcpProxyEngine(vpnService)
 
     companion object {
         private const val TAG = "TcpForwarder"
@@ -67,8 +84,24 @@ class TcpForwarder(
      * - Accept all ACK packets in ESTABLISHED
      * - Handle FIN transitions correctly
      * - Only send RST for truly unknown/invalid flows
+     *
+     * Phase 1: Added TCP proxy routing (guarded, passive)
      */
     fun handleTcpPacket(packet: ByteArray) {
+        // Phase 1: Guard rail for TCP proxy
+        // When USE_TCP_PROXY is true, route to TcpProxyEngine instead of legacy path
+        // Phase 1: Proxy is observation-only, does not forward traffic
+        if (TcpMode.USE_TCP_PROXY) {
+            try {
+                val metadata = TcpPacketParser.parse(packet)
+                tcpProxyEngine.handlePacket(metadata)
+            } catch (e: Exception) {
+                Log.w(TAG, "TCP proxy packet handling failed: ${e.message}")
+            }
+            return
+        }
+
+        // Legacy packet-based TCP forwarding (frozen implementation)
         try {
             val metadata = TcpPacketParser.parse(packet)
 
@@ -326,9 +359,14 @@ class TcpForwarder(
      * Close all active flows.
      *
      * Called when VPN stops.
+     *
+     * Phase 1: Also shutdown TCP proxy engine
      */
     fun closeAllFlows() {
         Log.i(TAG, "Closing all flows (${flows.size} active)")
+
+        // Phase 1: Shutdown TCP proxy engine
+        tcpProxyEngine.shutdown()
 
         val keys = flows.keys.toList()
         for (key in keys) {

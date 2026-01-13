@@ -364,6 +364,41 @@ class AegisVpnService : VpnService() {
     }
 
     /**
+     * Phase 1: Placeholder for TCP proxy socket creation
+     *
+     * Phase 0 guarantees:
+     * - VPN app is self-excluded via addDisallowedApplication()
+     * - Kernel routing automatically bypasses VPN for app sockets
+     * - protect() is unnecessary and has been removed
+     *
+     * This method will be used by TcpProxyEngine in Phase 2+ to create
+     * outbound sockets for virtual TCP connections.
+     *
+     * Phase 1: Not used yet (proxy is observation-only)
+     *
+     * @param destIp Destination IP address
+     * @param destPort Destination port
+     * @param timeoutMs Connect timeout in milliseconds
+     * @return Connected Socket
+     * @throws IOException if VPN not running or connect() fails
+     */
+    fun openProxySocket(
+        destIp: InetAddress,
+        destPort: Int,
+        timeoutMs: Int = 10_000
+    ): Socket {
+        if (!isRunning.get() || vpnInterface == null) {
+            throw IOException("VPN service not running")
+        }
+
+        // Phase 1: Placeholder - not called yet
+        // Phase 2+: Will create socket for proxy connections
+        val socket = Socket()
+        socket.connect(InetSocketAddress(destIp, destPort), timeoutMs)
+        return socket
+    }
+
+    /**
      * Create and connect a TCP socket.
      *
      * NetGuard-style self-exclusion via addDisallowedApplication() guarantees

@@ -17,6 +17,14 @@ import java.nio.ByteBuffer
  * - No retransmission logic
  * - No window management
  * - Just construct minimal valid packets for data delivery
+ *
+ * NOTE (Phase 0):
+ * This object is part of the packet-based TCP forwarding implementation.
+ * It is intentionally preserved for debugging, comparison, and rollback purposes
+ * while a TCP proxy is developed in parallel.
+ *
+ * DO NOT refactor or extend this object.
+ * The TCP proxy will not require packet construction for outbound connections.
  */
 object TcpPacketBuilder {
 
