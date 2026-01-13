@@ -364,43 +364,27 @@ class AegisVpnService : VpnService() {
     }
 
     /**
-     * Create and connect a protected TCP socket.
+     * Create and connect a TCP socket.
      *
-     * CRITICAL: This method MUST execute synchronously and inline on the VpnService call stack.
-     * All three operations (Socket(), protect(), connect()) must occur in the same execution context.
-     *
-     * This is the ONLY correct way to ensure VpnService.protect() authorization succeeds.
+     * NetGuard-style self-exclusion via addDisallowedApplication() guarantees
+     * kernel-level bypass, making VpnService.protect() unnecessary and incorrect.
      *
      * @param destIp Destination IP address
      * @param destPort Destination port
      * @param timeoutMs Connect timeout in milliseconds
-     * @return Connected and protected Socket
-     * @throws IOException if VPN not running, protect() fails, or connect() fails
+     * @return Connected Socket
+     * @throws IOException if VPN not running or connect() fails
      */
     fun createAndConnectProtectedTcpSocket(
         destIp: InetAddress,
         destPort: Int,
         timeoutMs: Int = 10_000
     ): Socket {
-        // Verify VPN is running
         if (!isRunning.get() || vpnInterface == null) {
             throw IOException("VPN service not running")
         }
 
-        // Log thread for verification
-        android.util.Log.i("AegisVPN", "Calling protect() on thread=${Thread.currentThread().name}")
-
-        // Create socket
         val socket = Socket()
-
-        // Protect socket (MUST be inline in VpnService call stack)
-        val ok = protect(socket)
-        if (!ok) {
-            socket.close()
-            throw IOException("VpnService.protect() failed")
-        }
-
-        // Connect socket
         socket.connect(InetSocketAddress(destIp, destPort), timeoutMs)
         return socket
     }

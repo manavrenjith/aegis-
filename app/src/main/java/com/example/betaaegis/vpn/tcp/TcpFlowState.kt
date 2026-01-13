@@ -1,31 +1,39 @@
 package com.example.betaaegis.vpn.tcp
 
 /**
- * Phase 2: TCP Flow State Machine
- *
- * Defines lifecycle states for TCP connections managed by the VPN.
+ * NetGuard-grade TCP Flow State Machine
  *
  * State transitions:
- * NEW -> CONNECTING: When outbound socket creation starts
- * CONNECTING -> ESTABLISHED: When socket connects successfully
- * ESTABLISHED -> CLOSING: When FIN/RST received from either side
- * CLOSING -> CLOSED: After cleanup complete
- * Any -> CLOSED: On error or VPN stop
+ * CLOSED -> SYN_SENT: When first SYN seen from app
+ * SYN_SENT -> ESTABLISHED: When SYN-ACK sent to app and socket connected
+ * ESTABLISHED -> FIN_WAIT_APP: When FIN received from server
+ * ESTABLISHED -> FIN_WAIT_SERVER: When FIN received from app
+ * FIN_WAIT_APP -> TIME_WAIT: When FIN received from app
+ * FIN_WAIT_SERVER -> TIME_WAIT: When FIN received from server
+ * TIME_WAIT -> CLOSED: After timeout or final ACK
+ * Any -> RESET: When RST received
+ * RESET -> CLOSED: Immediately after cleanup
  */
 enum class TcpFlowState {
-    /** First SYN seen from app */
-    NEW,
+    /** Initial state, no connection */
+    CLOSED,
 
-    /** Outbound socket being created/connected */
-    CONNECTING,
+    /** SYN sent to server, waiting for connection */
+    SYN_SENT,
 
     /** Bidirectional forwarding active */
     ESTABLISHED,
 
-    /** FIN/RST observed, graceful shutdown in progress */
-    CLOSING,
+    /** FIN received from server, waiting for app FIN */
+    FIN_WAIT_APP,
 
-    /** Cleanup complete, resources released */
-    CLOSED
+    /** FIN received from app, waiting for server FIN */
+    FIN_WAIT_SERVER,
+
+    /** Both sides closed, waiting for final cleanup */
+    TIME_WAIT,
+
+    /** Connection reset, cleanup pending */
+    RESET
 }
 

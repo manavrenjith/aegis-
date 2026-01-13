@@ -62,10 +62,11 @@ class TcpForwarder(
     /**
      * Handle TCP packet from TUN interface.
      *
-     * This is the ONLY path for TCP packets in Phase 2.
-     * No passive logic exists.
-     *
-     * @param packet Raw IP/TCP packet from TUN
+     * NetGuard-grade packet handling:
+     * - NEVER send RST in ESTABLISHED unless provably invalid
+     * - Accept all ACK packets in ESTABLISHED
+     * - Handle FIN transitions correctly
+     * - Only send RST for truly unknown/invalid flows
      */
     fun handleTcpPacket(packet: ByteArray) {
         try {
@@ -78,29 +79,97 @@ class TcpForwarder(
                 metadata.destPort
             )
 
+            // Check if flow exists
+            val connection = flows[flowKey]
+
             when {
-                metadata.isSyn && !metadata.isAck -> {
-                    // New connection request from app
-                    handleNewConnection(flowKey, metadata)
-                }
+                // RST from app - always handle
                 metadata.isRst -> {
-                    // Reset from app
-                    handleReset(flowKey)
+                    if (connection != null) {
+                        connection.handleRst()
+                        closeFlow(flowKey)
+                    }
                 }
+
+                // SYN (new connection)
+                metadata.isSyn && !metadata.isAck -> {
+                    if (connection == null) {
+                        // New connection request
+                        handleNewConnection(flowKey, metadata)
+                    } else {
+                        // Duplicate SYN for existing flow - ignore
+                        Log.v(TAG, "Duplicate SYN for existing flow: $flowKey")
+                    }
+                }
+
+                // FIN from app
                 metadata.isFin -> {
-                    // Close request from app
-                    handleFinFromApp(flowKey)
+                    if (connection != null) {
+                        connection.handleAppFin()
+                        // Check if should close
+                        if (connection.getState() == TcpFlowState.TIME_WAIT) {
+                            closeFlow(flowKey)
+                        }
+                    } else {
+                        // FIN for unknown flow - send RST
+                        Log.d(TAG, "FIN for unknown flow: $flowKey - sending RST")
+                        sendRstForKey(flowKey, metadata.seqNum, metadata.ackNum)
+                    }
                 }
-                metadata.isAck && metadata.payload.isEmpty() -> {
-                    // Pure ACK (no data)
-                    handleAck(flowKey, metadata)
+
+                // ACK or data packet
+                metadata.isAck -> {
+                    if (connection != null) {
+                        val state = connection.getState()
+
+                        when (state) {
+                            TcpFlowState.ESTABLISHED -> {
+                                // NetGuard-grade FAIL-OPEN behavior:
+                                // - Accept ALL ACK packets in ESTABLISHED
+                                // - Accept ALL payload (TLS ServerHello, certificates, data)
+                                // - NEVER send RST
+                                // - NEVER treat packets as protocol violations
+                                // - Let app and server negotiate correctness naturally
+                                connection.handleEstablishedPacket(metadata)
+
+                                // Update stats if payload present
+                                if (metadata.payload.isNotEmpty()) {
+                                    stats.bytesUplink.addAndGet(metadata.payload.size.toLong())
+                                }
+                            }
+                            TcpFlowState.FIN_WAIT_APP,
+                            TcpFlowState.FIN_WAIT_SERVER,
+                            TcpFlowState.TIME_WAIT -> {
+                                // Accept ACKs and data in FIN states
+                                // Still forwarding data during graceful close
+                                if (metadata.payload.isNotEmpty()) {
+                                    connection.sendToServer(metadata.payload)
+                                    stats.bytesUplink.addAndGet(metadata.payload.size.toLong())
+                                }
+                            }
+                            TcpFlowState.SYN_SENT -> {
+                                // Packet arrived before handshake complete
+                                // Ignore silently - app might be sending early data
+                                // DO NOT send RST
+                            }
+                            else -> {
+                                // Packet in CLOSED/RESET state - ignore silently
+                                // DO NOT send RST
+                            }
+                        }
+                    } else {
+                        // ACK/data for unknown flow
+                        // ONLY send RST if this is truly a new connection attempt
+                        // Do NOT send RST for stray packets that might be from recently closed flows
+                        if (metadata.payload.isNotEmpty() && !metadata.isSyn) {
+                            Log.d(TAG, "Packet for unknown flow: $flowKey payload=${metadata.payload.size} - sending RST")
+                            sendRstForKey(flowKey, metadata.seqNum, metadata.ackNum)
+                        }
+                    }
                 }
-                metadata.payload.isNotEmpty() -> {
-                    // Data packet from app
-                    handleDataFromApp(flowKey, metadata)
-                }
+
                 else -> {
-                    // Other packet types (ignore in Phase 2)
+                    // Other packet types - ignore
                     Log.v(TAG, "Ignoring packet: $flowKey, flags=${metadata.isSyn}/${metadata.isAck}/${metadata.isFin}/${metadata.isRst}")
                 }
             }
@@ -147,7 +216,7 @@ class TcpForwarder(
             if (decision == FlowDecision.BLOCK) {
                 Log.d(TAG, "TCP flow blocked by policy: $key (domain: $domain)")
                 // Send RST to app (connection rejected)
-                sendRstForKey(key)
+                sendRstForKey(key, metadata.seqNum + 1, metadata.ackNum)
                 return
             }
         }
@@ -160,13 +229,11 @@ class TcpForwarder(
         )
 
         // ATOMIC INSERTION: Use putIfAbsent to prevent race conditions
-        // If another thread already created this flow, discard our attempt
         val existing = flows.putIfAbsent(key, connection)
 
         if (existing != null) {
             // Another thread won the race - duplicate SYN
             Log.d(TAG, "Duplicate SYN for existing flow: $key")
-            // Close our unused connection
             connection.close()
             return
         }
@@ -183,7 +250,7 @@ class TcpForwarder(
                 // Connect to remote server (socket is protected inside)
                 connection.connect()
 
-                // Send SYN-ACK to app
+                // Send SYN-ACK to app (transitions to ESTABLISHED)
                 connection.sendSynAck()
 
                 // Start bidirectional forwarding
@@ -193,7 +260,7 @@ class TcpForwarder(
                 Log.e(TAG, "Connection failed for $key: ${e.message}", e)
 
                 // Send RST to app (connection rejected)
-                connection.sendRst()
+                sendRstForKey(key, metadata.seqNum + 1, metadata.ackNum)
 
                 // Clean up
                 closeFlow(key)
@@ -202,74 +269,29 @@ class TcpForwarder(
     }
 
     /**
-     * Handle data from app (uplink).
+     * Send RST for a flow key (when no connection exists or rejected).
      *
-     * Extract payload and write to socket stream.
-     */
-    private fun handleDataFromApp(key: TcpFlowKey, metadata: TcpMetadata) {
-        val connection = flows[key]
-
-        if (connection == null) {
-            // No connection exists - send RST
-            Log.w(TAG, "Data for unknown flow: $key")
-            sendRstForKey(key)
-            return
-        }
-
-        if (metadata.payload.isNotEmpty()) {
-            connection.sendToServer(metadata.payload)
-            stats.bytesUplink.addAndGet(metadata.payload.size.toLong())
-        }
-
-        // Update ACK tracking
-        connection.handleAck(metadata.ackNum)
-    }
-
-    /**
-     * Handle pure ACK from app.
-     */
-    private fun handleAck(key: TcpFlowKey, metadata: TcpMetadata) {
-        val connection = flows[key] ?: return
-        connection.handleAck(metadata.ackNum)
-    }
-
-    /**
-     * Handle FIN from app (graceful close request).
+     * IMPORTANT: Only call this when RST is truly required:
+     * - Unknown flow receiving data
+     * - Policy-blocked connection
+     * - Connection setup failure
      *
-     * State transition: ESTABLISHED -> CLOSING -> CLOSED
+     * DO NOT call for:
+     * - Expected ESTABLISHED packets
+     * - TLS data
+     * - Reordered packets
      */
-    private fun handleFinFromApp(key: TcpFlowKey) {
-        Log.d(TAG, "FIN from app: $key")
-
-        val connection = flows[key]
-        if (connection != null) {
-            connection.closeGracefully()
-            closeFlow(key)
-        }
-    }
-
-    /**
-     * Handle RST from app (immediate close).
-     *
-     * State transition: Any -> CLOSED
-     */
-    private fun handleReset(key: TcpFlowKey) {
-        Log.d(TAG, "RST from app: $key")
-        closeFlow(key)
-    }
-
-    /**
-     * Send RST for a flow key (when no connection exists).
-     */
-    private fun sendRstForKey(key: TcpFlowKey) {
+    private fun sendRstForKey(key: TcpFlowKey, seqNum: Long, ackNum: Long) {
         try {
+            Log.d(TAG, "Sending RST: $key seq=$seqNum ack=$ackNum")
+
             val packet = TcpPacketBuilder.build(
                 srcIp = key.destIp,
                 srcPort = key.destPort,
                 destIp = key.srcIp,
                 destPort = key.srcPort,
                 flags = 0x04, // RST
-                seqNum = 0,
+                seqNum = ackNum, // RST uses ack as seq
                 ackNum = 0,
                 payload = byteArrayOf()
             )

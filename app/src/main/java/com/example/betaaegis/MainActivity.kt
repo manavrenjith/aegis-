@@ -1,7 +1,6 @@
 package com.example.betaaegis
 
 import android.content.ComponentName
-import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.net.VpnService
@@ -71,9 +70,6 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         setContent {
-            // TODO: Phase 5 - Add statistics refresh when service binding is implemented
-            // Will use LaunchedEffect to periodically call vpnService.getStatistics()
-
             BetaAegisTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     if (showStatistics && isVpnActive) {
@@ -111,7 +107,7 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         try {
             unbindService(serviceConnection)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Service not bound
         }
     }
@@ -135,7 +131,7 @@ class MainActivity : ComponentActivity() {
         isVpnActive = true
 
         // Try to bind to service for statistics access
-        bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        bindService(intent, serviceConnection, BIND_AUTO_CREATE)
     }
 
     private fun stopVpnService() {
@@ -158,14 +154,14 @@ class MainActivity : ComponentActivity() {
             if (shareIntent != null) {
                 startActivity(Intent.createChooser(shareIntent, "Share VPN Diagnostics"))
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Silently ignore export failure
         }
     }
 }
 
 @Composable
-fun VpnControlScreen(
+private fun VpnControlScreen(
     modifier: Modifier = Modifier,
     isVpnActive: Boolean,
     statistics: VpnStatistics,
