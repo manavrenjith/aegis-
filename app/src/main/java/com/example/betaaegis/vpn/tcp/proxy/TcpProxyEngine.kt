@@ -47,8 +47,16 @@ class TcpProxyEngine(
         private const val TCP_WINDOW = 65535
     }
 
+    // Phase 5: Global observability metrics (read-only, no enforcement)
+    @Volatile
+    private var peakConcurrentConnections = 0
+
+    @Volatile
+    private var totalConnectionsCreated = 0L
+
     /**
      * Phase 4: Handle incoming TCP packet (complete lifecycle)
+     * Phase 5: Flow map safety and metrics tracking
      *
      * On SYN: Send SYN-ACK back to app
      * On ACK: Create outbound socket + start downlink reader
@@ -64,9 +72,17 @@ class TcpProxyEngine(
             metadata.destPort
         )
 
-        // Get or create virtual connection
-        val conn = connections.getOrPut(key) {
-            VirtualTcpConnection(key)
+        // Phase 5: Thread-safe flow map access with metrics
+        val conn = synchronized(connections) {
+            connections.getOrPut(key) {
+                // Phase 5: Track metrics on new connection
+                totalConnectionsCreated++
+                val currentSize = connections.size
+                if (currentSize > peakConcurrentConnections) {
+                    peakConcurrentConnections = currentSize
+                }
+                VirtualTcpConnection(key)
+            }
         }
 
         // Phase 4: Complete lifecycle handling
@@ -75,7 +91,7 @@ class TcpProxyEngine(
                 // RST from app - abort connection
                 conn.onRstReceived()
                 Log.d(TAG, "RST received from app: $key")
-                evictFlow(key)
+                evictFlow(key, "APP_RST")
             }
 
             metadata.isSyn && !metadata.isAck -> {
@@ -121,6 +137,7 @@ class TcpProxyEngine(
 
     /**
      * Phase 4: Handle FIN from app
+     * Phase 5: Add explicit eviction reason
      */
     private fun handleFin(conn: VirtualTcpConnection, metadata: TcpMetadata) {
         when (conn.state) {
@@ -133,7 +150,7 @@ class TcpProxyEngine(
             VirtualTcpState.FIN_WAIT_APP -> {
                 // App acknowledged server's FIN - both sides closed
                 Log.d(TAG, "FIN from app (both closed) → cleanup: ${conn.key}")
-                evictFlow(conn.key)
+                evictFlow(conn.key, "BOTH_FIN")
             }
 
             else -> {
@@ -184,7 +201,7 @@ class TcpProxyEngine(
         } catch (e: Exception) {
             Log.e(TAG, "Uplink forwarding error: ${conn.key} - ${e.message}")
             conn.handleRst(tunOutputStream)
-            evictFlow(conn.key)
+            evictFlow(conn.key, "UPLINK_ERROR")
         }
     }
 
@@ -202,40 +219,77 @@ class TcpProxyEngine(
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create outbound socket: ${conn.key} - ${e.message}")
             conn.handleRst(tunOutputStream)
-            evictFlow(conn.key)
+            evictFlow(conn.key, "SOCKET_CREATE_ERROR")
         }
     }
 
     /**
      * Phase 4: Evict flow from connection map
+     * Phase 5: Thread-safe removal with explicit eviction logging
      * Performs cleanup and removes connection
      * Idempotent - safe to call multiple times
      */
-    private fun evictFlow(key: TcpFlowKey) {
-        val conn = connections.remove(key) ?: return
-        conn.close()
+    private fun evictFlow(key: TcpFlowKey, reason: String) {
+        // Phase 5: Thread-safe removal - ensures exactly-once eviction
+        val conn = synchronized(connections) {
+            connections.remove(key)
+        }
+
+        if (conn != null) {
+            Log.d(TAG, "FLOW_EVICT reason=$reason key=$key")
+            conn.close(reason)
+        } else {
+            // Phase 5: Already evicted (idempotent behavior)
+            Log.d(TAG, "FLOW_EVICT_SKIP reason=ALREADY_REMOVED evict_reason=$reason key=$key")
+        }
     }
 
     /**
      * Clean up all virtual connections
      * Phase 4: Complete cleanup with eviction
+     * Phase 5: Structured shutdown logging
      */
     fun shutdown() {
         Log.i(TAG, "Shutting down TCP proxy engine, ${connections.size} connections tracked")
-        val keys = connections.keys.toList()
-        keys.forEach { evictFlow(it) }
+
+        val keys = synchronized(connections) {
+            connections.keys.toList()
+        }
+
+        keys.forEach { evictFlow(it, "VPN_SHUTDOWN") }
+
+        Log.i(
+            TAG,
+            "TCP proxy shutdown complete. " +
+                    "Total created: $totalConnectionsCreated, " +
+                    "Peak concurrent: $peakConcurrentConnections"
+        )
     }
 
     /**
      * Get active connection count for telemetry
      */
-    fun getActiveConnectionCount(): Int = connections.size
+    fun getActiveConnectionCount(): Int = synchronized(connections) {
+        connections.size
+    }
+
+    /**
+     * Phase 5: Get peak concurrent connections (observability)
+     */
+    fun getPeakConcurrentConnections(): Int = peakConcurrentConnections
+
+    /**
+     * Phase 5: Get total connections created (observability)
+     */
+    fun getTotalConnectionsCreated(): Long = totalConnectionsCreated
 
     /**
      * Get connection state for debugging
      */
     fun getConnectionState(key: TcpFlowKey): VirtualTcpState? {
-        return connections[key]?.state
+        return synchronized(connections) {
+            connections[key]?.state
+        }
     }
 }
 

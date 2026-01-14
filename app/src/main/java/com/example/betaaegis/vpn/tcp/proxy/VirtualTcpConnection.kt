@@ -9,9 +9,11 @@ import kotlin.random.Random
 
 /**
  * Phase 4: Virtual TCP Connection (Complete Lifecycle)
+ * Phase 5: Hardening + Observability
  *
  * Represents a single user-space TCP proxy connection.
  * Phase 4 adds complete connection lifecycle with FIN/RST handling.
+ * Phase 5 adds stability, observability, and defensive hardening.
  *
  * Responsibilities:
  * - Manage TCP state machine for virtual connection (app side)
@@ -20,8 +22,10 @@ import kotlin.random.Random
  * - Handle graceful shutdown (FIN from app or server)
  * - Handle error cases (RST)
  * - Clean up resources properly
+ * - Track activity timestamps (Phase 5)
+ * - Maintain traffic metrics (Phase 5)
  *
- * Phase 4: Complete connection lifecycle
+ * Phase 5: Production hardening
  */
 class VirtualTcpConnection(
     val key: TcpFlowKey
@@ -54,6 +58,26 @@ class VirtualTcpConnection(
 
     @Volatile
     private var closed = false
+
+    // Phase 5: Activity tracking (observability only, no timeouts)
+    @Volatile
+    var lastUplinkActivityMs: Long = System.currentTimeMillis()
+        private set
+
+    @Volatile
+    var lastDownlinkActivityMs: Long = System.currentTimeMillis()
+        private set
+
+    private val connectionStartMs: Long = System.currentTimeMillis()
+
+    // Phase 5: Traffic metrics (observability only)
+    @Volatile
+    var bytesUplinked: Long = 0
+        private set
+
+    @Volatile
+    var bytesDownlinked: Long = 0
+        private set
 
     companion object {
         private const val TAG = "VirtualTcpConn"
@@ -91,15 +115,22 @@ class VirtualTcpConnection(
 
     fun onDataReceived(payloadSize: Int) {
         clientDataBytesSeen += payloadSize
+        // Phase 5: Track uplink activity
+        lastUplinkActivityMs = System.currentTimeMillis()
+        bytesUplinked += payloadSize
     }
 
     /**
      * Phase 4: Handle FIN from app (graceful shutdown)
+     * Phase 5: Add activity tracking and structured logging
      * Performs half-close on outbound socket
      */
     fun handleAppFin(tunOutputStream: FileOutputStream) {
         if (state == VirtualTcpState.ESTABLISHED) {
-            Log.d(TAG, "FIN from app → half-close: $key")
+            // Phase 5: Track activity
+            lastUplinkActivityMs = System.currentTimeMillis()
+
+            Log.d(TAG, "FLOW_EVENT reason=APP_FIN state=ESTABLISHED->FIN_WAIT_SERVER key=$key")
 
             state = VirtualTcpState.FIN_WAIT_SERVER
 
@@ -182,32 +213,38 @@ class VirtualTcpConnection(
 
     /**
      * Phase 4: Handle EOF from server (server closed)
+     * Phase 5: Add activity tracking and structured logging
      * Sends FIN to app and transitions state
      */
     private fun handleServerFin(tunOutputStream: FileOutputStream) {
         if (closed) return
 
-        Log.d(TAG, "FIN from server → closing: $key")
+        // Phase 5: Track activity
+        lastDownlinkActivityMs = System.currentTimeMillis()
 
         when (state) {
             VirtualTcpState.ESTABLISHED -> {
                 // Server closed first
+                Log.d(TAG, "FLOW_EVENT reason=SERVER_FIN state=ESTABLISHED->FIN_WAIT_APP key=$key")
                 state = VirtualTcpState.FIN_WAIT_APP
                 sendFinToApp(tunOutputStream)
             }
             VirtualTcpState.FIN_WAIT_SERVER -> {
                 // Both sides closed - complete shutdown
+                Log.d(TAG, "FLOW_EVENT reason=BOTH_FIN state=FIN_WAIT_SERVER->CLOSED key=$key")
                 state = VirtualTcpState.CLOSED
                 sendFinToApp(tunOutputStream)
             }
             else -> {
                 // Unexpected state
+                Log.d(TAG, "FLOW_EVENT reason=UNEXPECTED_SERVER_FIN state=$state key=$key")
             }
         }
     }
 
     /**
      * Phase 3: Send data to app via TUN
+     * Phase 5: Track downlink activity and bytes
      */
     private fun sendDataToApp(payload: ByteArray, tunOutputStream: FileOutputStream) {
         if (closed) return
@@ -236,6 +273,10 @@ class VirtualTcpConnection(
         }
 
         serverDataBytesSent += payload.size
+
+        // Phase 5: Track downlink activity
+        lastDownlinkActivityMs = System.currentTimeMillis()
+        bytesDownlinked += payload.size
     }
 
     /**
@@ -294,24 +335,57 @@ class VirtualTcpConnection(
 
     /**
      * Phase 4: Clean up connection resources (idempotent)
+     * Phase 5: Enhanced idempotent cleanup with explicit logging
      * Can be called multiple times safely
      */
-    fun close() {
-        if (closed) return
+    fun close(reason: String = "EXPLICIT_CLOSE") {
+        // Phase 5: Idempotent guard - safe to call multiple times
+        if (closed) {
+            Log.d(TAG, "FLOW_CLOSE_SKIP reason=ALREADY_CLOSED key=$key")
+            return
+        }
         closed = true
+
+        // Phase 5: Calculate connection lifetime
+        val lifetimeMs = System.currentTimeMillis() - connectionStartMs
+
+        // Phase 5: Structured cleanup logging
+        Log.d(
+            TAG,
+            "FLOW_CLOSE reason=$reason state=$state lifetime=${lifetimeMs}ms " +
+                    "uplink=${bytesUplinked}B downlink=${bytesDownlinked}B key=$key"
+        )
 
         stopDownlinkReader()
 
-        try {
-            outboundSocket?.close()
-        } catch (e: Exception) {
-            // Ignore close errors
+        // Phase 5: Defensive socket close - never double-close
+        val socketToClose = outboundSocket
+        outboundSocket = null
+
+        if (socketToClose != null) {
+            try {
+                socketToClose.close()
+            } catch (e: Exception) {
+                // Phase 5: Ignore close errors silently
+            }
         }
 
-        outboundSocket = null
         state = VirtualTcpState.CLOSED
+    }
 
-        Log.d(TAG, "Connection closed → cleanup complete: $key")
+    /**
+     * Phase 5: Observability - get connection lifetime in milliseconds
+     */
+    fun getConnectionLifetimeMs(): Long {
+        return System.currentTimeMillis() - connectionStartMs
+    }
+
+    /**
+     * Phase 5: Observability - get idle time in milliseconds
+     */
+    fun getIdleTimeMs(): Long {
+        val lastActivity = maxOf(lastUplinkActivityMs, lastDownlinkActivityMs)
+        return System.currentTimeMillis() - lastActivity
     }
 
     override fun toString(): String {
