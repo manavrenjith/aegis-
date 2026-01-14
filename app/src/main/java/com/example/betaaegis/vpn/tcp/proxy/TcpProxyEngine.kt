@@ -156,6 +156,12 @@ class TcpProxyEngine(
             VirtualTcpState.ESTABLISHED -> {
                 if (metadata.payload.isNotEmpty()) {
                     forwardUplink(conn, metadata.payload)
+                } else {
+                    // ACK-only packet from app
+                    Log.d(
+                        "TcpProxy",
+                        "APP ACK:\n  ackNum=${metadata.ackNum}"
+                    )
                 }
             }
 

@@ -212,15 +212,23 @@ class VirtualTcpConnection(
     private fun sendDataToApp(payload: ByteArray, tunOutputStream: FileOutputStream) {
         if (closed) return
 
+        val seq = serverSeq + 1 + serverDataBytesSent
+        val ack = serverAck + clientDataBytesSeen
+
         val packet = TcpPacketBuilder.build(
             srcIp = key.destIp,
             srcPort = key.destPort,
             destIp = key.srcIp,
             destPort = key.srcPort,
             flags = TCP_ACK or TCP_PSH,
-            seqNum = serverSeq + 1 + serverDataBytesSent,
-            ackNum = serverAck + clientDataBytesSeen,
+            seqNum = seq,
+            ackNum = ack,
             payload = payload
+        )
+
+        Log.d(
+            "TcpProxy",
+            "DOWNLINK SEND:\n  seq=$seq\n  ack=$ack\n  payload=${payload.size}"
         )
 
         synchronized(tunOutputStream) {
