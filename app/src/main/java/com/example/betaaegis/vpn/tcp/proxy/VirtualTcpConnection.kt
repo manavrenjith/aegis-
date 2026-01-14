@@ -213,7 +213,7 @@ class VirtualTcpConnection(
         if (closed) return
 
         val seq = serverSeq + 1 + serverDataBytesSent
-        val ack = serverAck + clientDataBytesSeen
+        val ack = clientSeq + 1 + clientDataBytesSeen
 
         val packet = TcpPacketBuilder.build(
             srcIp = key.destIp,
@@ -251,7 +251,7 @@ class VirtualTcpConnection(
             destPort = key.srcPort,
             flags = TCP_FIN or TCP_ACK,
             seqNum = serverSeq + 1 + serverDataBytesSent,
-            ackNum = serverAck + clientDataBytesSeen,
+            ackNum = clientSeq + 1 + clientDataBytesSeen,
             payload = byteArrayOf()
         )
 
@@ -275,7 +275,7 @@ class VirtualTcpConnection(
             destPort = key.srcPort,
             flags = TCP_RST or TCP_ACK,
             seqNum = serverSeq + 1 + serverDataBytesSent,
-            ackNum = serverAck + clientDataBytesSeen,
+            ackNum = clientSeq + 1 + clientDataBytesSeen,
             payload = byteArrayOf()
         )
 
