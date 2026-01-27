@@ -79,6 +79,14 @@ class VirtualTcpConnection(
     var bytesDownlinked: Long = 0
         private set
 
+    // ACK-only path: Track last ACK from app (messaging app correctness)
+    @Volatile
+    private var lastAckFromApp: Long = 0
+
+    // Phase 5.1: Server socket liveness tracking (messaging app fix)
+    @Volatile
+    private var lastServerSocketAliveMs: Long = System.currentTimeMillis()
+
     companion object {
         private const val TAG = "VirtualTcpConn"
         private const val READ_BUFFER_SIZE = 16 * 1024
@@ -118,6 +126,17 @@ class VirtualTcpConnection(
         // Phase 5: Track uplink activity
         lastUplinkActivityMs = System.currentTimeMillis()
         bytesUplinked += payloadSize
+    }
+
+    /**
+     * ACK-only path: Handle ACK-only packet from app
+     * Critical for messaging apps (WhatsApp, Telegram)
+     * ACK-only packets MUST update activity to prevent idle disconnects
+     */
+    fun onAckOnlyReceived(ackNum: Long) {
+        // Update activity timestamp - ACK-only is NOT idle
+        lastUplinkActivityMs = System.currentTimeMillis()
+        lastAckFromApp = ackNum
     }
 
     /**
@@ -191,6 +210,9 @@ class VirtualTcpConnection(
                     }
 
                     if (bytesRead > 0) {
+                        // Phase 5.1: Track server socket liveness
+                        lastServerSocketAliveMs = System.currentTimeMillis()
+
                         val payload = buffer.copyOf(bytesRead)
                         sendDataToApp(payload, tunOutputStream)
                         Log.d(TAG, "Forwarded downlink payload size=$bytesRead flow=$key")
@@ -304,6 +326,41 @@ class VirtualTcpConnection(
     }
 
     /**
+     * ACK-only path: Send ACK-only packet to app
+     * Critical for messaging apps - mirrors server keepalive ACKs
+     * Must be called when server sends ACK-only or on periodic keepalive
+     */
+    fun sendAckOnlyToApp(tunOutputStream: FileOutputStream) {
+        if (closed) return
+
+        val seq = serverSeq + 1 + serverDataBytesSent
+        val ack = clientSeq + 1 + clientDataBytesSeen
+
+        val packet = TcpPacketBuilder.build(
+            srcIp = key.destIp,
+            srcPort = key.destPort,
+            destIp = key.srcIp,
+            destPort = key.srcPort,
+            flags = TCP_ACK,
+            seqNum = seq,
+            ackNum = ack,
+            payload = byteArrayOf()
+        )
+
+        Log.d(
+            TAG,
+            "ACK_ONLY_TO_APP: seq=$seq ack=$ack state=$state key=$key"
+        )
+
+        synchronized(tunOutputStream) {
+            tunOutputStream.write(packet)
+        }
+
+        // ACK-only: Update activity timestamp but NOT byte counters
+        lastDownlinkActivityMs = System.currentTimeMillis()
+    }
+
+    /**
      * Phase 4: Send RST to app
      */
     private fun sendRstToApp(tunOutputStream: FileOutputStream) {
@@ -386,6 +443,55 @@ class VirtualTcpConnection(
     fun getIdleTimeMs(): Long {
         val lastActivity = maxOf(lastUplinkActivityMs, lastDownlinkActivityMs)
         return System.currentTimeMillis() - lastActivity
+    }
+
+    /**
+     * Phase 5.1: Detect idle-but-alive server condition
+     * Returns true when server socket is alive but no data has flowed for a while
+     * Used to reflect server ACK liveness back to app (messaging app fix)
+     */
+    fun isServerAliveButIdle(now: Long): Boolean {
+        return !closed &&
+               state == VirtualTcpState.ESTABLISHED &&
+               (now - lastServerSocketAliveMs) < 60_000 && // socket alive within 60s
+               (now - lastDownlinkActivityMs) > 15_000 && // no server data for 15s
+               (now - lastUplinkActivityMs) > 15_000       // app idle for 15s
+    }
+
+    /**
+     * Phase 5.1: Reflect server ACK to app (pure ACK, no payload)
+     * Critical for messaging apps during long idle periods
+     * Confirms TCP connection is still alive even without data flow
+     */
+    fun reflectServerAckToApp(tunOutputStream: FileOutputStream) {
+        if (closed) return
+
+        val seq = serverSeq + 1 + serverDataBytesSent
+        val ack = clientSeq + 1 + clientDataBytesSeen
+
+        val packet = TcpPacketBuilder.build(
+            srcIp = key.destIp,
+            srcPort = key.destPort,
+            destIp = key.srcIp,
+            destPort = key.srcPort,
+            flags = TCP_ACK,
+            seqNum = seq,
+            ackNum = ack,
+            payload = byteArrayOf()
+        )
+
+        val idleMs = System.currentTimeMillis() - lastDownlinkActivityMs
+        Log.d(
+            TAG,
+            "SERVER_ACK_REFLECT: seq=$seq ack=$ack idleMs=$idleMs key=$key"
+        )
+
+        synchronized(tunOutputStream) {
+            tunOutputStream.write(packet)
+        }
+
+        // Phase 5.1: Update downlink activity (ACK is activity)
+        lastDownlinkActivityMs = System.currentTimeMillis()
     }
 
     override fun toString(): String {

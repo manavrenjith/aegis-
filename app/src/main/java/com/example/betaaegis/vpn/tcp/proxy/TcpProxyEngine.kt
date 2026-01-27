@@ -57,12 +57,14 @@ class TcpProxyEngine(
     /**
      * Phase 4: Handle incoming TCP packet (complete lifecycle)
      * Phase 5: Flow map safety and metrics tracking
+     * Phase 5.1: Opportunistic server ACK reflection (messaging app fix)
      *
      * On SYN: Send SYN-ACK back to app
      * On ACK: Create outbound socket + start downlink reader
      * On ESTABLISHED + data: Forward to outbound socket (uplink)
      * On FIN: Handle graceful shutdown
      * On RST: Handle connection abort
+     * Phase 5.1: Reflect server liveness when idle but alive
      */
     fun handlePacket(metadata: TcpMetadata) {
         val key = TcpFlowKey(
@@ -83,6 +85,13 @@ class TcpProxyEngine(
                 }
                 VirtualTcpConnection(key)
             }
+        }
+
+        // Phase 5.1: Opportunistic server ACK reflection (NO TIMERS)
+        // Trigger only when packet arrives and connection is idle-but-alive
+        val now = System.currentTimeMillis()
+        if (conn.isServerAliveButIdle(now)) {
+            conn.reflectServerAckToApp(tunOutputStream)
         }
 
         // Phase 4: Complete lifecycle handling
@@ -171,14 +180,29 @@ class TcpProxyEngine(
             }
 
             VirtualTcpState.ESTABLISHED -> {
-                if (metadata.payload.isNotEmpty()) {
-                    forwardUplink(conn, metadata.payload)
-                } else {
-                    // ACK-only packet from app
+                // ACK-only path: Explicit detection (messaging app correctness)
+                val isAckOnly = metadata.payload.isEmpty() &&
+                        !metadata.isSyn &&
+                        !metadata.isFin &&
+                        !metadata.isRst
+
+                if (isAckOnly) {
+                    // ACK-only packet from app - MUST update state
+                    conn.onAckOnlyReceived(metadata.ackNum)
                     Log.d(
-                        "TcpProxy",
-                        "APP ACK:\n  ackNum=${metadata.ackNum}"
+                        TAG,
+                        "ACK_ONLY_FROM_APP: ack=${metadata.ackNum} state=${conn.state} key=${conn.key}"
                     )
+
+                    // ACK-only path: Optionally reflect ACK back to app
+                    // This keeps long-lived connections alive (messaging apps)
+                    // Only send if connection has been established for some time
+                    if (conn.getConnectionLifetimeMs() > 5000) {
+                        conn.sendAckOnlyToApp(tunOutputStream)
+                    }
+                } else if (metadata.payload.isNotEmpty()) {
+                    // Payload packet
+                    forwardUplink(conn, metadata.payload)
                 }
             }
 
