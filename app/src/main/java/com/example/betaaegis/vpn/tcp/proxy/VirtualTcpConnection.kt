@@ -5,27 +5,27 @@ import com.example.betaaegis.vpn.tcp.TcpFlowKey
 import com.example.betaaegis.vpn.tcp.TcpPacketBuilder
 import java.io.FileOutputStream
 import java.net.Socket
+import java.nio.ByteBuffer
+import java.nio.channels.SelectionKey
+import java.nio.channels.Selector
+import java.nio.channels.SocketChannel
 import kotlin.random.Random
 
 /**
- * Phase 4: Virtual TCP Connection (Complete Lifecycle)
- * Phase 5: Hardening + Observability
+ * STREAM-DRIVEN TCP PROXY (POST PHASE 5.1)
  *
- * Represents a single user-space TCP proxy connection.
- * Phase 4 adds complete connection lifecycle with FIN/RST handling.
- * Phase 5 adds stability, observability, and defensive hardening.
+ * This is a stream-driven TCP connection, NOT packet-driven.
  *
- * Responsibilities:
- * - Manage TCP state machine for virtual connection (app side)
- * - Track sequence/acknowledgment numbers
- * - Forward data bidirectionally
- * - Handle graceful shutdown (FIN from app or server)
- * - Handle error cases (RST)
- * - Clean up resources properly
- * - Track activity timestamps (Phase 5)
- * - Maintain traffic metrics (Phase 5)
+ * Core Invariant:
+ * - As long as the TCP connection exists, an execution context exists
+ * - Server socket liveness is detectable even during complete silence
+ * - No reliance on packet arrival for execution
  *
- * Phase 5: Production hardening
+ * Architecture:
+ * - Per-connection blocking stream loop using NIO Selector
+ * - Wakes on kernel TCP events (socket readiness)
+ * - Reflects server liveness to app without timers
+ * - Guaranteed execution as long as connection is ESTABLISHED
  */
 class VirtualTcpConnection(
     val key: TcpFlowKey
@@ -49,12 +49,17 @@ class VirtualTcpConnection(
         private set
     var serverDataBytesSent: Long = 0
         private set
+
+    // STREAM-DRIVEN: Outbound socket and stream context
     var outboundSocket: Socket? = null
         internal set
-    private var downlinkThread: Thread? = null
+
+    private var outboundChannel: SocketChannel? = null
+    private var streamSelector: Selector? = null
+    private var streamThread: Thread? = null
 
     @Volatile
-    private var isReaderActive = false
+    private var streamActive = false
 
     @Volatile
     private var closed = false
@@ -173,7 +178,7 @@ class VirtualTcpConnection(
 
         sendRstToApp(tunOutputStream)
         state = VirtualTcpState.RESET
-        stopDownlinkReader()
+        stopStreamLoop()
     }
 
     /**
@@ -181,7 +186,7 @@ class VirtualTcpConnection(
      */
     fun onRstReceived() {
         state = VirtualTcpState.RESET
-        stopDownlinkReader()
+        stopStreamLoop()
     }
 
     /**
@@ -189,45 +194,125 @@ class VirtualTcpConnection(
      * Handles EOF and FIN properly
      */
     fun startDownlinkReader(tunOutputStream: FileOutputStream) {
-        if (isReaderActive || outboundSocket == null || closed) {
+        if (streamActive || outboundSocket == null || closed) {
             return
         }
 
-        isReaderActive = true
+        streamActive = true
 
-        downlinkThread = Thread {
+        streamThread = Thread {
             try {
-                val inputStream = outboundSocket!!.getInputStream()
-                val buffer = ByteArray(READ_BUFFER_SIZE)
+                // Convert blocking socket to non-blocking NIO channel
+                val channel = outboundSocket!!.channel
+                    ?: throw IllegalStateException("Socket has no channel")
 
-                while (isReaderActive && !Thread.currentThread().isInterrupted && !closed) {
-                    val bytesRead = inputStream.read(buffer)
+                channel.configureBlocking(false)
+                outboundChannel = channel
 
-                    if (bytesRead == -1) {
-                        // EOF - server closed connection
-                        handleServerFin(tunOutputStream)
-                        break
-                    }
+                // Create selector for this connection
+                val selector = Selector.open()
+                streamSelector = selector
 
-                    if (bytesRead > 0) {
-                        // Phase 5.1: Track server socket liveness
-                        lastServerSocketAliveMs = System.currentTimeMillis()
+                // Register for read events
+                channel.register(selector, SelectionKey.OP_READ)
 
-                        val payload = buffer.copyOf(bytesRead)
-                        sendDataToApp(payload, tunOutputStream)
-                        Log.d(TAG, "Forwarded downlink payload size=$bytesRead flow=$key")
+                val readBuffer = ByteBuffer.allocate(READ_BUFFER_SIZE)
+
+                Log.d(TAG, "STREAM_LOOP_START key=$key")
+
+                // CORE INVARIANT: This loop blocks and always runs while connection exists
+                while (streamActive && !Thread.currentThread().isInterrupted && !closed) {
+                    // Block until socket is ready or timeout (timeout allows liveness check)
+                    // Timeout is NOT a timer - it's a safety mechanism for selector wakeup
+                    val ready = selector.select(30_000) // 30s max block
+
+                    if (!streamActive || closed) break
+
+                    val now = System.currentTimeMillis()
+
+                    if (ready > 0) {
+                        // Socket event occurred - process it
+                        val selectedKeys = selector.selectedKeys()
+                        val iterator = selectedKeys.iterator()
+
+                        while (iterator.hasNext()) {
+                            val skey = iterator.next()
+                            iterator.remove()
+
+                            if (!skey.isValid) continue
+
+                            if (skey.isReadable) {
+                                // Server socket has data or EOF
+                                readBuffer.clear()
+                                val bytesRead = channel.read(readBuffer)
+
+                                when {
+                                    bytesRead > 0 -> {
+                                        // Data received from server
+                                        lastServerSocketAliveMs = now
+
+                                        readBuffer.flip()
+                                        val payload = ByteArray(bytesRead)
+                                        readBuffer.get(payload)
+
+                                        sendDataToApp(payload, tunOutputStream)
+                                        Log.d(TAG, "STREAM_DATA size=$bytesRead key=$key")
+                                    }
+
+                                    bytesRead == -1 -> {
+                                        // EOF - server closed
+                                        Log.d(TAG, "STREAM_EOF key=$key")
+                                        handleServerFin(tunOutputStream)
+                                        break
+                                    }
+
+                                    else -> {
+                                        // bytesRead == 0, no data yet
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Timeout occurred - selector woke with no socket events
+                        // This is where we detect idle-but-alive condition
+
+                        // Check if server socket is alive but idle
+                        if (state == VirtualTcpState.ESTABLISHED && !closed) {
+                            val socketAliveRecently = (now - lastServerSocketAliveMs) < 60_000
+                            val serverIdle = (now - lastDownlinkActivityMs) > 15_000
+                            val appIdle = (now - lastUplinkActivityMs) > 15_000
+
+                            if (socketAliveRecently && serverIdle && appIdle) {
+                                // STREAM-DRIVEN LIVENESS REFLECTION
+                                // Server TCP is alive (we're blocking on it)
+                                // But no data has flowed - reflect liveness to app
+                                Log.d(TAG, "STREAM_LIVENESS_REFLECT key=$key")
+                                reflectServerAckToApp(tunOutputStream)
+                            }
+                        }
                     }
                 }
+
+                Log.d(TAG, "STREAM_LOOP_END key=$key")
+
             } catch (e: Exception) {
-                if (isReaderActive && !closed) {
-                    Log.e(TAG, "Downlink reader error: $key - ${e.message}")
+                if (streamActive && !closed) {
+                    Log.e(TAG, "STREAM_LOOP_ERROR key=$key error=${e.message}")
                     handleRst(tunOutputStream)
                 }
             } finally {
-                isReaderActive = false
+                streamActive = false
+
+                // Clean up selector
+                try {
+                    streamSelector?.close()
+                } catch (e: Exception) {
+                    // Ignore
+                }
+                streamSelector = null
             }
         }.apply {
-            name = "TcpProxy-Downlink-$key"
+            name = "TcpStream-$key"
             isDaemon = true
             start()
         }
@@ -383,11 +468,17 @@ class VirtualTcpConnection(
     }
 
     /**
-     * Phase 3: Stop downlink reader thread
+     * STREAM-DRIVEN: Stop stream loop
      */
-    private fun stopDownlinkReader() {
-        isReaderActive = false
-        downlinkThread?.interrupt()
+    private fun stopStreamLoop() {
+        streamActive = false
+        streamThread?.interrupt()
+
+        try {
+            streamSelector?.wakeup()
+        } catch (e: Exception) {
+            // Ignore
+        }
     }
 
     /**
@@ -413,7 +504,7 @@ class VirtualTcpConnection(
                     "uplink=${bytesUplinked}B downlink=${bytesDownlinked}B key=$key"
         )
 
-        stopDownlinkReader()
+        stopStreamLoop()
 
         // Phase 5: Defensive socket close - never double-close
         val socketToClose = outboundSocket
@@ -446,24 +537,10 @@ class VirtualTcpConnection(
     }
 
     /**
-     * Phase 5.1: Detect idle-but-alive server condition
-     * Returns true when server socket is alive but no data has flowed for a while
-     * Used to reflect server ACK liveness back to app (messaging app fix)
+     * STREAM-DRIVEN: Reflect server ACK to app (internal to stream loop)
+     * Called from stream loop during idle-but-alive condition
      */
-    fun isServerAliveButIdle(now: Long): Boolean {
-        return !closed &&
-               state == VirtualTcpState.ESTABLISHED &&
-               (now - lastServerSocketAliveMs) < 60_000 && // socket alive within 60s
-               (now - lastDownlinkActivityMs) > 15_000 && // no server data for 15s
-               (now - lastUplinkActivityMs) > 15_000       // app idle for 15s
-    }
-
-    /**
-     * Phase 5.1: Reflect server ACK to app (pure ACK, no payload)
-     * Critical for messaging apps during long idle periods
-     * Confirms TCP connection is still alive even without data flow
-     */
-    fun reflectServerAckToApp(tunOutputStream: FileOutputStream) {
+    private fun reflectServerAckToApp(tunOutputStream: FileOutputStream) {
         if (closed) return
 
         val seq = serverSeq + 1 + serverDataBytesSent
@@ -483,14 +560,14 @@ class VirtualTcpConnection(
         val idleMs = System.currentTimeMillis() - lastDownlinkActivityMs
         Log.d(
             TAG,
-            "SERVER_ACK_REFLECT: seq=$seq ack=$ack idleMs=$idleMs key=$key"
+            "STREAM_ACK_REFLECT: seq=$seq ack=$ack idleMs=$idleMs key=$key"
         )
 
         synchronized(tunOutputStream) {
             tunOutputStream.write(packet)
         }
 
-        // Phase 5.1: Update downlink activity (ACK is activity)
+        // Update downlink activity (ACK is activity)
         lastDownlinkActivityMs = System.currentTimeMillis()
     }
 

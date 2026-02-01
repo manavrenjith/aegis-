@@ -9,23 +9,27 @@ import java.io.FileOutputStream
 import java.net.InetAddress
 
 /**
- * Phase 4: TCP Proxy Engine (Complete Lifecycle)
+ * STREAM-DRIVEN TCP PROXY ENGINE (POST PHASE 5.1)
  *
- * User-space TCP proxy that terminates TCP connections inside the VPN.
- * Phase 4 adds complete connection lifecycle with FIN/RST handling.
+ * User-space TCP proxy with guaranteed execution context.
  *
- * Architecture:
+ * Architecture (Stream-Driven):
  * - Intercepts TCP SYN packets
  * - Sends SYN-ACK back to app via TUN
  * - Accepts ACK to complete handshake
  * - Creates outbound socket to destination
+ * - Starts per-connection stream loop (NIO Selector)
+ * - Stream loop blocks on socket events (not packet arrival)
  * - Forwards app data → outbound socket (uplink)
  * - Forwards socket data → app via TUN (downlink)
+ * - Reflects server liveness during idle (stream loop handles)
  * - Handles graceful shutdown (FIN from app or server)
  * - Handles error cases (RST)
  * - Cleans up resources and evicts flows
  *
- * Phase 4 Status: Complete connection lifecycle
+ * Core Invariant:
+ * TCP connection alive → execution context alive
+ * No reliance on packet arrival for liveness detection
  */
 class TcpProxyEngine(
     private val vpnService: AegisVpnService,
@@ -57,14 +61,13 @@ class TcpProxyEngine(
     /**
      * Phase 4: Handle incoming TCP packet (complete lifecycle)
      * Phase 5: Flow map safety and metrics tracking
-     * Phase 5.1: Opportunistic server ACK reflection (messaging app fix)
+     * STREAM-DRIVEN: Liveness reflection now handled by stream loop
      *
      * On SYN: Send SYN-ACK back to app
-     * On ACK: Create outbound socket + start downlink reader
+     * On ACK: Create outbound socket + start stream loop
      * On ESTABLISHED + data: Forward to outbound socket (uplink)
      * On FIN: Handle graceful shutdown
      * On RST: Handle connection abort
-     * Phase 5.1: Reflect server liveness when idle but alive
      */
     fun handlePacket(metadata: TcpMetadata) {
         val key = TcpFlowKey(
@@ -87,12 +90,8 @@ class TcpProxyEngine(
             }
         }
 
-        // Phase 5.1: Opportunistic server ACK reflection (NO TIMERS)
-        // Trigger only when packet arrives and connection is idle-but-alive
-        val now = System.currentTimeMillis()
-        if (conn.isServerAliveButIdle(now)) {
-            conn.reflectServerAckToApp(tunOutputStream)
-        }
+        // STREAM-DRIVEN: No opportunistic reflection here
+        // Stream loop handles liveness reflection when selector times out
 
         // Phase 4: Complete lifecycle handling
         when {
