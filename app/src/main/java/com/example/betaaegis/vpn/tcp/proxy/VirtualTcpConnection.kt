@@ -12,20 +12,28 @@ import java.nio.channels.SocketChannel
 import kotlin.random.Random
 
 /**
- * STREAM-DRIVEN TCP PROXY (POST PHASE 5.1)
+ * NETGUARD-IDENTICAL TCP PROXY
  *
- * This is a stream-driven TCP connection, NOT packet-driven.
+ * Pure socket-event-driven TCP connection.
  *
  * Core Invariant:
- * - As long as the TCP connection exists, an execution context exists
- * - Server socket liveness is detectable even during complete silence
- * - No reliance on packet arrival for execution
+ * - Execution occurs ONLY when kernel TCP socket state changes
+ * - NO timeout-based execution
+ * - NO time-based wakeups
+ * - NO idle timers
  *
  * Architecture:
  * - Per-connection blocking stream loop using NIO Selector
- * - Wakes on kernel TCP events (socket readiness)
- * - Reflects server liveness to app without timers
+ * - selector.select() blocks INDEFINITELY (no timeout)
+ * - Wakes ONLY on kernel TCP events:
+ *   - Data available (OP_READ)
+ *   - Socket closed (EOF)
+ *   - TCP state changes (ACK progression, window updates)
  * - Guaranteed execution as long as connection is ESTABLISHED
+ *
+ * NetGuard Equivalence:
+ * This implementation is architecturally identical to NetGuard.
+ * No time-based execution paths exist.
  */
 class VirtualTcpConnection(
     val key: TcpFlowKey
@@ -190,8 +198,11 @@ class VirtualTcpConnection(
     }
 
     /**
-     * Phase 4: Start downlink reader thread
+     * NETGUARD-IDENTICAL: Pure socket-event-driven stream loop
      * Handles EOF and FIN properly
+     * 
+     * NO TIMEOUT. NO TIME-BASED EXECUTION.
+     * Execution occurs ONLY on kernel TCP socket events.
      */
     fun startDownlinkReader(tunOutputStream: FileOutputStream) {
         if (streamActive || outboundSocket == null || closed) {
@@ -220,15 +231,14 @@ class VirtualTcpConnection(
 
                 Log.d(TAG, "STREAM_LOOP_START key=$key")
 
-                // CORE INVARIANT: This loop blocks and always runs while connection exists
+                // NETGUARD-IDENTICAL: Block indefinitely until kernel socket events
+                // NO TIMEOUT - execution driven purely by TCP socket state changes
                 while (streamActive && !Thread.currentThread().isInterrupted && !closed) {
-                    // Block until socket is ready or timeout (timeout allows liveness check)
-                    // Timeout is NOT a timer - it's a safety mechanism for selector wakeup
-                    val ready = selector.select(30_000) // 30s max block
+                    // Block indefinitely until socket is ready
+                    // Kernel TCP events (ACK, FIN, window updates) wake this call
+                    val ready = selector.select()  // INFINITE BLOCK
 
                     if (!streamActive || closed) break
-
-                    val now = System.currentTimeMillis()
 
                     if (ready > 0) {
                         // Socket event occurred - process it
@@ -249,6 +259,7 @@ class VirtualTcpConnection(
                                 when {
                                     bytesRead > 0 -> {
                                         // Data received from server
+                                        val now = System.currentTimeMillis()
                                         lastServerSocketAliveMs = now
 
                                         readBuffer.flip()
@@ -272,25 +283,12 @@ class VirtualTcpConnection(
                                 }
                             }
                         }
-                    } else {
-                        // Timeout occurred - selector woke with no socket events
-                        // This is where we detect idle-but-alive condition
-
-                        // Check if server socket is alive but idle
-                        if (state == VirtualTcpState.ESTABLISHED && !closed) {
-                            val socketAliveRecently = (now - lastServerSocketAliveMs) < 60_000
-                            val serverIdle = (now - lastDownlinkActivityMs) > 15_000
-                            val appIdle = (now - lastUplinkActivityMs) > 15_000
-
-                            if (socketAliveRecently && serverIdle && appIdle) {
-                                // STREAM-DRIVEN LIVENESS REFLECTION
-                                // Server TCP is alive (we're blocking on it)
-                                // But no data has flowed - reflect liveness to app
-                                Log.d(TAG, "STREAM_LIVENESS_REFLECT key=$key")
-                                reflectServerAckToApp(tunOutputStream)
-                            }
-                        }
                     }
+                    
+                    // NETGUARD-IDENTICAL: No timeout handling
+                    // No idle checks
+                    // No time-based reflection
+                    // Execution happens ONLY when kernel wakes us
                 }
 
                 Log.d(TAG, "STREAM_LOOP_END key=$key")

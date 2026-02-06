@@ -9,27 +9,29 @@ import java.io.FileOutputStream
 import java.net.InetAddress
 
 /**
- * STREAM-DRIVEN TCP PROXY ENGINE (POST PHASE 5.1)
+ * NETGUARD-IDENTICAL TCP PROXY ENGINE
  *
- * User-space TCP proxy with guaranteed execution context.
+ * User-space TCP proxy with pure socket-event-driven execution.
  *
- * Architecture (Stream-Driven):
+ * Architecture (NetGuard-Identical):
  * - Intercepts TCP SYN packets
  * - Sends SYN-ACK back to app via TUN
  * - Accepts ACK to complete handshake
  * - Creates outbound socket to destination
  * - Starts per-connection stream loop (NIO Selector)
- * - Stream loop blocks on socket events (not packet arrival)
+ * - Stream loop blocks INDEFINITELY on selector.select()
+ * - Wakes ONLY on kernel TCP socket events
  * - Forwards app data → outbound socket (uplink)
  * - Forwards socket data → app via TUN (downlink)
- * - Reflects server liveness during idle (stream loop handles)
  * - Handles graceful shutdown (FIN from app or server)
  * - Handles error cases (RST)
  * - Cleans up resources and evicts flows
  *
  * Core Invariant:
  * TCP connection alive → execution context alive
- * No reliance on packet arrival for liveness detection
+ * NO timeout-based execution
+ * NO time-driven wakeups
+ * Pure kernel-event-driven
  */
 class TcpProxyEngine(
     private val vpnService: AegisVpnService,
